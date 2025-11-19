@@ -18,85 +18,114 @@ NOTICE_PDF = os.path.join(BASE_PATH, "notice.pdf")
 OUTPUT_REPORT = os.path.join(BASE_PATH, "mismatch_report.pdf")
 
 # -------------------------
-# STEP 1: Extract clean text + remove junk
+# STEP 1: Extract raw text
 # -------------------------
-def clean_text(text, is_proxy=False):
-    lines = text.splitlines()
-    cleaned = []
-    
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        # Remove Board recommendations
-        if re.search(r"board.*recommend|recommends you vote", line, re.I):
-            continue
-        # Remove signature block
-        if is_proxy and re.search(r"please sign|joint owners|corporation|authorized officer", line, re.I):
-            continue
-        # Remove voting boxes
-        if re.search(r"☐|For|Against|Abstain|Year", line):
-            continue
-        cleaned.append(line)
-    
-    return "\n".join(cleaned)
-
-def extract_text(pdf_path):
+def extract_raw_text(pdf_path):
     doc = fitz.open(pdf_path)
     text = ""
     for page in doc:
         text += page.get_text("text")
     doc.close()
-    return clean_text(text, "proxy" in pdf_path.lower())
+    return text
 
 # -------------------------
-# STEP 2: Extract proposals by indentation + numbering (HUMAN LOGIC)
+# STEP 2: Clean text — remove junk but keep structure
 # -------------------------
-def extract_proposals_by_indent(text):
-    lines = [l.strip() for l in text.splitlines() if l.strip()]
-    proposals = []
-    current = ""
+def clean_text_for_parsing(text, is_proxy=False):
+    lines = text.splitlines()
+    cleaned = []
     
     for line in lines:
-        # Detect proposal start: number/letter at start (1., 1) , 2a., 2b., 01), etc.)
-        if re.match(r"^(\d{1,3}[a-zA-Z]?\.?\s*[\.)]?)|(\d{1,3}[a-zA-Z]?\s*$)", line):
-            if current:
-                proposals.append(current.strip())
-            current = line
-        else:
-            # This line belongs to previous proposal (indented)
-            if current:
-                current += " " + line
+        stripped = line.strip()
+        
+        # Remove signature block (proxy only)
+        if is_proxy and re.search(r"please sign|joint owners|authorized officer|executor|administrator", stripped, re.I):
+            continue
+            
+        # Remove voting boxes and "For Against Abstain"
+        if re.search(r"☐|□|For\s+Against\s+Abstain|Year", stripped):
+            continue
+            
+        # Remove "The Board of Directors recommends..." lines
+        if re.search(r"board.*recommend|recommends you vote", stripped, re.I):
+            continue
+            
+        # Remove "Board Recommends" column header and "For" bullets in Notice
+        if re.search(r"Board\s+Recommends|For\s*$", stripped, re.I):
+            continue
+            
+        if stripped:
+            cleaned.append(line)  # Keep original spacing for indentation detection
     
-    if current:
-        proposals.append(current.strip())
+    return "\n".join(cleaned)
+
+# -------------------------
+# STEP 3: Extract proposals using REAL indentation + numbering (HUMAN LOGIC)
+# -------------------------
+def extract_proposals(text):
+    lines = text.splitlines()
+    proposals = []
+    current_proposal = []
+    current_indent = 0
+
+    # Detect proposal start pattern: 1.  1)  01.  2a.  2b.  10a. etc.
+    start_pattern = re.compile(r'^(\s*)((\d{1,3}[a-zA-Z]?\.?)|(\d{1,3}[a-zA-Z]?\)))\s')
+
+    for line in lines:
+        match = start_pattern.match(line)
+        if match:
+            # Save previous proposal
+            if current_proposal:
+                proposals.append(" ".join(current_proposal).strip())
+                current_proposal = []
+            
+            indent = len(match.group(1))
+            label_and_text = line[match.end():].strip()
+            current_proposal.append(label_and_text)
+            current_indent = indent
+        else:
+            # Continuation line — belongs to current proposal
+            if current_proposal:
+                # Remove leading whitespace but keep content
+                content = line.strip()
+                if content:
+                    current_proposal.append(content)
+    
+    # Don't forget the last one
+    if current_proposal:
+        proposals.append(" ".join(current_proposal).strip())
     
     return proposals
 
 # -------------------------
-# STEP 3: Normalize for comparison
+# STEP 4: Normalize for comparison
 # -------------------------
 def normalize(text):
-    text = re.sub(r'\s+', ' ', text)
-    text = re.sub(r'\s+([.,;])', r'\1', text)
+    if not text:
+        return ""
+    text = re.sub(r'\s+', ' ', text)           # Collapse all whitespace
+    text = re.sub(r'\s+([.,;:!?)])', r'\1', text)
     return text.strip().lower()
 
 # -------------------------
-# STEP 4: Compare one-by-one (SIMPLE & ACCURATE)
+# STEP 5: Compare one-by-one
 # -------------------------
-def compare_proposals(proxy_props, notice_props):
+def compare_proposals(proxy_list, notice_list):
     results = []
-    max_len = max(len(proxy_props), len(notice_props))
+    max_len = max(len(proxy_list), len(notice_list))
     
     for i in range(max_len):
-        p = proxy_props[i] if i < len(proxy_props) else "[MISSING IN PROXY]"
-        n = notice_props[i] if i < len(notice_props) else "[MISSING IN NOTICE]"
+        p = proxy_list[i] if i < len(proxy_list) else "[MISSING IN PROXY]"
+        n = notice_list[i] if i < len(notice_list) else "[MISSING IN NOTICE]"
         
+        # Extract label from first few words
         label = f"Item {i+1}"
-        if i < len(proxy_props) and re.match(r"^\d", proxy_props[i]):
-            label = re.split(r'\s+', proxy_props[i], 1)[0]
-        elif i < len(notice_props) and re.match(r"^\d", notice_props[i]):
-            label = re.split(r'\s+', notice_props[i], 1)[0]
+        if i < len(proxy_list):
+            first_words = proxy_list[i].split()[:3]
+            label = " ".join(first_words)
+        elif i < len(notice_list):
+            first_words = notice_list[i].split()[:3]
+            label = " ".join(first_words)
         
         if normalize(p) == normalize(n):
             results.append((label, "MATCH", ""))
@@ -106,7 +135,7 @@ def compare_proposals(proxy_props, notice_props):
     return results
 
 # -------------------------
-# STEP 5: Beautiful Report
+# STEP 6: Beautiful Report
 # -------------------------
 def create_report(results):
     fd, temp_path = tempfile.mkstemp(suffix=".pdf", dir=BASE_PATH)
@@ -132,12 +161,12 @@ def create_report(results):
     data = [["#", "Label", "Status", "Difference"]]
     for i, (label, status, info) in enumerate(results, 1):
         if status == "MATCH":
-            data.append([str(i), label, Paragraph("<font color='green'><b>MATCH</b></font>", styles['Normal']), "Identical"])
+            data.append([str(i), label, Paragraph("<font color='green'><b>MATCH</b></font>", styles['Normal']), "Identical content"])
         else:
             data.append([str(i), label, Paragraph("<font color='red'><b>MISMATCH</b></font>", styles['Normal']), 
                         Paragraph(info.replace("\n", "<br/>"), styles['Normal'])])
 
-    table = Table(data, colWidths=[40, 100, 90, 300])
+    table = Table(data, colWidths=[40, 140, 90, 280])
     table.setStyle(TableStyle([
         ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#2E86C1")),
         ('TEXTCOLOR', (0,0), (-1,0), colors.white),
@@ -150,6 +179,9 @@ def create_report(results):
         ('VALIGN', (0,0), (-1,-1), 'TOP'),
     ]))
     elements.append(table)
+    elements.append(Spacer(1, 30))
+    elements.append(Paragraph("<i>Report generated by Rahul's Final QC Master Tool</i>", styles['Normal']))
+
     doc.build(elements)
 
     if os.path.exists(OUTPUT_REPORT):
@@ -159,21 +191,24 @@ def create_report(results):
     print(f"Report saved: {OUTPUT_REPORT}")
 
 # -------------------------
-# MAIN — SIMPLE & HUMAN
+# MAIN
 # -------------------------
 def run_qc():
-    print("Starting Proxy vs Notice QC (Human Logic)...\n")
+    print("Starting FINAL Proxy vs Notice QC (Human Accuracy)...\n")
     
-    proxy_text = extract_text(PROXY_PDF)
-    notice_text = extract_text(NOTICE_PDF)
+    proxy_raw = extract_raw_text(PROXY_PDF)
+    notice_raw = extract_raw_text(NOTICE_PDF)
     
-    proxy_props = extract_proposals_by_indent(proxy_text)
-    notice_props = extract_proposals_by_indent(notice_text)
+    proxy_clean = clean_text_for_parsing(proxy_raw, is_proxy=True)
+    notice_clean = clean_text_for_parsing(notice_raw, is_proxy=False)
     
-    print(f"Proxy proposals : {len(proxy_props)}")
-    print(f"Notice proposals: {len(notice_props)}\n")
+    proxy_proposals = extract_proposals(proxy_clean)
+    notice_proposals = extract_proposals(notice_clean)
     
-    results = compare_proposals(proxy_props, notice_props)
+    print(f"Proxy proposals found : {len(proxy_proposals)}")
+    print(f"Notice proposals found: {len(notice_proposals)}\n")
+    
+    results = compare_proposals(proxy_proposals, notice_proposals)
     create_report(results)
     
     mismatches = sum(1 for r in results if r[1] == "MISMATCH")
