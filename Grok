@@ -7,29 +7,29 @@ notice_path = "notice.pdf"
 output_pdf = "Agenda_Comparison_Report.pdf"
 
 # -------------------------------------------------------------
-# 1. Extract ONLY the agenda area using top offset
+# 1. Extract ONLY the left agenda area (first 7.5 inches)
 # -------------------------------------------------------------
-def extract_agenda_text(path, top_offset_in):
+def extract_agenda_text(path):
     doc = fitz.open(path)
 
-    top_pt = top_offset_in * 72  # convert inches to points
-    width_pt = 8.5 * 72          # full page width
-    height_pt = 11 * 72          # full page height
-    bottom_pt = height_pt         # go to page bottom
+    # Convert inches to points (1 inch = 72 points)
+    cutoff_x = 7.5 * 72
 
-    for page in doc:
-        rect = fitz.Rect(0, top_pt, width_pt, bottom_pt)
-        text = page.get_text("text", clip=rect)
+    # Find the first page that contains proposal labels
+    label_re = re.compile(r'^\s*(\d{1,2}[a-z]?\.|0\d\)|\d{1,2}\))', re.MULTILINE)
 
-        # check for numbered proposals
-        label_re = re.compile(r'^\s*(\d{1,2}[a-z]?\.|0\d\)|\d{1,2}\))', re.MULTILINE)
-        if label_re.search(text):
-            return text
+    for pno in range(len(doc)):
+        page = doc[pno]
+        clip = fitz.Rect(0, 0, cutoff_x, page.rect.height)
+        txt = page.get_text("text", clip=clip)
 
-    # fallback: first page
+        if label_re.search(txt):
+            return txt
+
+    # fallback: return page 1 left area
     page = doc[0]
-    rect = fitz.Rect(0, top_pt, width_pt, bottom_pt)
-    return page.get_text("text", clip=rect)
+    clip = fitz.Rect(0, 0, cutoff_x, page.rect.height)
+    return page.get_text("text", clip=clip)
 
 # -------------------------------------------------------------
 # 2. Extract proposals from text
@@ -37,12 +37,15 @@ def extract_agenda_text(path, top_offset_in):
 def extract_proposals(text):
     proposals = {}
     current = None
+
+    # Label pattern detects 1. , 1a. , 01) , 1) etc.
     pattern = re.compile(r'^\s*(\d{1,2}[a-z]?\.|0\d\)|\d{1,2}\))')
 
     for line in text.splitlines():
         line = line.strip()
         if not line:
             continue
+
         m = pattern.match(line)
         if m:
             label = m.group(1)
@@ -56,6 +59,7 @@ def extract_proposals(text):
     # collapse extra spaces
     for k in proposals:
         proposals[k] = re.sub(r'\s+', ' ', proposals[k]).strip()
+
     return proposals
 
 # -------------------------------------------------------------
@@ -63,45 +67,59 @@ def extract_proposals(text):
 # -------------------------------------------------------------
 def compare(notice_dict, proxy_dict):
     results = []
+
     for lbl, n_text in notice_dict.items():
         p_text = proxy_dict.get(lbl)
+
         if p_text is None:
             results.append((lbl, "MISSING_IN_PROXY"))
-        elif n_text == p_text:
+            continue
+
+        if n_text == p_text:
             results.append((lbl, "MATCH"))
         else:
             results.append((lbl, f"MISMATCH → Notice: '{n_text}' | Proxy: '{p_text}'"))
+
     return results
 
 # -------------------------------------------------------------
-# 4. Create PDF report with multi-line wrapped text
+# 4. Create report PDF with proper margins and multi-line text
 # -------------------------------------------------------------
 def create_report(results, output_filepath):
     doc = fitz.open()
     page = doc.new_page()
+
+    # Title
     page.insert_text((40, 20), "AGENDA COMPARISON REPORT", fontsize=16)
 
+    # Margins and settings
     left_margin = 40
-    right_margin = 550
+    right_margin = 550  # Width = 510
     top_margin = 60
     bottom_margin = 780
     font_size = 11
-    line_height = font_size + 3
-    max_chars_per_line = 90
+    line_height = font_size + 3  # spacing between lines
+    max_chars_per_line = 90  # approximate chars per line
 
     y = top_margin
+
     for label, status in results:
         text = f"{label}: {status}"
+
+        # Wrap text into multiple lines
         wrapped_lines = textwrap.wrap(text, width=max_chars_per_line)
 
         for line in wrapped_lines:
+            # Check if adding line exceeds bottom margin
             if y + line_height > bottom_margin:
                 page = doc.new_page()
-                y = 40
-            page.insert_text((left_margin, y), line, fontsize=font_size)
-            y += line_height
+                y = 40  # top margin for new page
 
-        y += 5  # small space between proposals
+            page.insert_text((left_margin, y), line, fontsize=font_size)
+            y += line_height  # move y for next line
+
+        # Small space after each proposal
+        y += 5
 
     doc.save(output_filepath)
     doc.close()
@@ -109,19 +127,19 @@ def create_report(results, output_filepath):
 # -------------------------------------------------------------
 # PIPELINE
 # -------------------------------------------------------------
-print("Extracting notice agenda...")
-notice_text = extract_agenda_text(notice_path, top_offset_in=2.9)
-print("Extracting proxy agenda...")
-proxy_text  = extract_agenda_text(proxy_path, top_offset_in=5.8)
 
-print("Extracting proposals...")
+# Extract agenda text
+notice_text = extract_agenda_text(notice_path)
+proxy_text  = extract_agenda_text(proxy_path)
+
+# Convert to dictionaries
 notice_dict = extract_proposals(notice_text)
 proxy_dict  = extract_proposals(proxy_text)
 
-print("Comparing proposals...")
+# Compare
 results = compare(notice_dict, proxy_dict)
 
-print("Generating report PDF...")
+# Report
 create_report(results, output_pdf)
 
 print("DONE! Saved as", output_pdf)
