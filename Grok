@@ -7,28 +7,28 @@ notice_path = "notice.pdf"
 output_pdf = "Agenda_Comparison_Report.pdf"
 
 # -------------------------------------------------------------
-# 1. Extract ONLY the agenda area (specific height)
+# 1. Extract ONLY the agenda area using top offset
 # -------------------------------------------------------------
-def extract_agenda_text(path, area_height_in):
+def extract_agenda_text(path, top_offset_in):
     doc = fitz.open(path)
 
-    # Convert inches to points
-    height_pt = area_height_in * 72
-    width_pt = 8.5 * 72  # full page width
+    top_pt = top_offset_in * 72  # convert inches to points
+    width_pt = 8.5 * 72          # full page width
+    height_pt = 11 * 72          # full page height
+    bottom_pt = height_pt         # go to page bottom
 
     for page in doc:
-        # Extract rectangle: full width, only up to area_height_in
-        rect = fitz.Rect(0, 0, width_pt, height_pt)
+        rect = fitz.Rect(0, top_pt, width_pt, bottom_pt)
         text = page.get_text("text", clip=rect)
 
-        # Check for numbered proposals
+        # check for numbered proposals
         label_re = re.compile(r'^\s*(\d{1,2}[a-z]?\.|0\d\)|\d{1,2}\))', re.MULTILINE)
         if label_re.search(text):
             return text
 
-    # fallback: first page in rectangle
+    # fallback: first page
     page = doc[0]
-    rect = fitz.Rect(0, 0, width_pt, height_pt)
+    rect = fitz.Rect(0, top_pt, width_pt, bottom_pt)
     return page.get_text("text", clip=rect)
 
 # -------------------------------------------------------------
@@ -110,9 +110,9 @@ def create_report(results, output_filepath):
 # PIPELINE
 # -------------------------------------------------------------
 print("Extracting notice agenda...")
-notice_text = extract_agenda_text(notice_path, area_height_in=2.9)
+notice_text = extract_agenda_text(notice_path, top_offset_in=2.9)
 print("Extracting proxy agenda...")
-proxy_text  = extract_agenda_text(proxy_path, area_height_in=5.8)
+proxy_text  = extract_agenda_text(proxy_path, top_offset_in=5.8)
 
 print("Extracting proposals...")
 notice_dict = extract_proposals(notice_text)
