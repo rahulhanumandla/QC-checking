@@ -1,44 +1,68 @@
 import fitz
 import re
 import textwrap
+from openai import OpenAI
 
+# ---------------- CONFIG ----------------
 proxy_path = "proxy.pdf"
 notice_path = "notice.pdf"
 output_pdf = "Agenda_Comparison_Report.pdf"
+openai_api_key = "YOUR_OPENAI_API_KEY"  # replace with your key
 
-# -------------------------------------------------------------
-# 1. Extract ONLY the left agenda area (first 7.5 inches)
-# -------------------------------------------------------------
+client = OpenAI(api_key=openai_api_key)
+
+# ---------------- 1. Extract left agenda area ----------------
 def extract_agenda_text(path):
     doc = fitz.open(path)
-
-    # Convert inches to points (1 inch = 72 points)
-    cutoff_x = 7.5 * 72
-
-    # Find the first page that contains proposal labels
+    cutoff_x = 7.5 * 72  # 7.5 inches in points
     label_re = re.compile(r'^\s*(\d{1,2}[a-z]?\.|0\d\)|\d{1,2}\))', re.MULTILINE)
 
     for pno in range(len(doc)):
         page = doc[pno]
         clip = fitz.Rect(0, 0, cutoff_x, page.rect.height)
         txt = page.get_text("text", clip=clip)
-
         if label_re.search(txt):
             return txt
 
-    # fallback: return page 1 left area
+    # fallback
     page = doc[0]
     clip = fitz.Rect(0, 0, cutoff_x, page.rect.height)
     return page.get_text("text", clip=clip)
 
-# -------------------------------------------------------------
-# 2. Extract proposals from text
-# -------------------------------------------------------------
+# ---------------- 2. AI-based line classification ----------------
+def is_proposal_line(line):
+    """
+    Ask GPT if this line is part of proposal text or extra content.
+    Returns True if it's proposal, False if extra.
+    """
+    if not line.strip():
+        return False
+
+    prompt = f"""
+    You are given a single line from a corporate proxy/notice PDF.
+    Decide if this line is part of the PROPOSAL description or if it is EXTRA content
+    like voting instructions, nominees, signature, or headers.
+    ONLY answer YES if it's part of the proposal description, NO otherwise.
+
+    Line: \"{line}\"
+    """
+    try:
+        response = client.chat.completions.create(
+            model="gpt-5-mini",
+            messages=[{"role": "user", "content": prompt}]
+        )
+        answer = response.choices[0].message.content.strip().upper()
+        return "YES" in answer
+    except Exception as e:
+        print("AI error:", e)
+        return True  # fallback to include line if AI fails
+
+# ---------------- 3. Extract proposals using AI ----------------
 def extract_proposals(text):
     proposals = {}
-    current = None
+    current_label = None
+    lines_buffer = []
 
-    # Label pattern detects 1. , 1a. , 01) , 1) etc.
     pattern = re.compile(r'^\s*(\d{1,2}[a-z]?\.|0\d\)|\d{1,2}\))')
 
     for line in text.splitlines():
@@ -48,43 +72,48 @@ def extract_proposals(text):
 
         m = pattern.match(line)
         if m:
-            label = m.group(1)
+            # Save previous proposal
+            if current_label and lines_buffer:
+                proposals[current_label] = " ".join(lines_buffer).strip()
+            current_label = m.group(1)
             content = line[m.end():].strip()
-            proposals[label] = content
-            current = label
+            lines_buffer = [content] if content else []
         else:
-            if current:
-                proposals[current] += " " + line
+            if current_label:
+                if is_proposal_line(line):
+                    lines_buffer.append(line)
+                else:
+                    # Stop appending if line is extra content
+                    continue
 
-    # collapse extra spaces
+    # Save last proposal
+    if current_label and lines_buffer:
+        proposals[current_label] = " ".join(lines_buffer).strip()
+
+    # Collapse extra spaces
     for k in proposals:
         proposals[k] = re.sub(r'\s+', ' ', proposals[k]).strip()
 
     return proposals
 
-# -------------------------------------------------------------
-# 3. Compare Notice → Proxy (Notice is master)
-# -------------------------------------------------------------
+# ---------------- 4. Compare Notice → Proxy ----------------
+def normalize(text):
+    return re.sub(r'\s+', ' ', text).strip()
+
 def compare(notice_dict, proxy_dict):
     results = []
-
     for lbl, n_text in notice_dict.items():
         p_text = proxy_dict.get(lbl)
-
         if p_text is None:
             results.append((lbl, "MISSING_IN_PROXY"))
             continue
-
-        if n_text == p_text:
+        if normalize(n_text) == normalize(p_text):
             results.append((lbl, "MATCH"))
         else:
             results.append((lbl, f"MISMATCH → Notice: '{n_text}' | Proxy: '{p_text}'"))
-
     return results
 
-# -------------------------------------------------------------
-# 4. Create report PDF with proper margins and multi-line text
-# -------------------------------------------------------------
+# ---------------- 5. Generate PDF report ----------------
 def create_report(results, output_filepath):
     doc = fitz.open()
     page = doc.new_page()
@@ -92,54 +121,39 @@ def create_report(results, output_filepath):
     # Title
     page.insert_text((40, 20), "AGENDA COMPARISON REPORT", fontsize=16)
 
-    # Margins and settings
     left_margin = 40
-    right_margin = 550  # Width = 510
+    right_margin = 550
     top_margin = 60
     bottom_margin = 780
     font_size = 11
-    line_height = font_size + 3  # spacing between lines
-    max_chars_per_line = 90  # approximate chars per line
+    line_height = font_size + 3
+    max_chars_per_line = 90
 
     y = top_margin
 
     for label, status in results:
         text = f"{label}: {status}"
-
-        # Wrap text into multiple lines
         wrapped_lines = textwrap.wrap(text, width=max_chars_per_line)
 
         for line in wrapped_lines:
-            # Check if adding line exceeds bottom margin
             if y + line_height > bottom_margin:
                 page = doc.new_page()
-                y = 40  # top margin for new page
-
+                y = 40
             page.insert_text((left_margin, y), line, fontsize=font_size)
-            y += line_height  # move y for next line
-
-        # Small space after each proposal
+            y += line_height
         y += 5
 
     doc.save(output_filepath)
     doc.close()
 
-# -------------------------------------------------------------
-# PIPELINE
-# -------------------------------------------------------------
-
-# Extract agenda text
+# ---------------- 6. Pipeline ----------------
 notice_text = extract_agenda_text(notice_path)
 proxy_text  = extract_agenda_text(proxy_path)
 
-# Convert to dictionaries
 notice_dict = extract_proposals(notice_text)
 proxy_dict  = extract_proposals(proxy_text)
 
-# Compare
 results = compare(notice_dict, proxy_dict)
-
-# Report
 create_report(results, output_pdf)
 
 print("DONE! Saved as", output_pdf)
