@@ -7,29 +7,29 @@ notice_path = "notice.pdf"
 output_pdf = "Agenda_Comparison_Report.pdf"
 
 # -------------------------------------------------------------
-# 1. Extract ONLY the agenda area (custom rectangle)
+# 1. Extract ONLY the agenda area (specific height)
 # -------------------------------------------------------------
-def extract_agenda_text(path, area_width_in, area_height_in):
+def extract_agenda_text(path, area_height_in):
     doc = fitz.open(path)
 
-    # Convert inches to points (1 inch = 72 points)
-    width_pt = area_width_in * 72
+    # Convert inches to points
     height_pt = area_height_in * 72
+    width_pt = 8.5 * 72  # full page width
 
-    # Assume agenda starts from top-left corner
-    clip = fitz.Rect(0, 0, width_pt, height_pt)
+    for page in doc:
+        # Extract rectangle: full width, only up to area_height_in
+        rect = fitz.Rect(0, 0, width_pt, height_pt)
+        text = page.get_text("text", clip=rect)
 
-    # Find the first page that contains numbered proposals
-    label_re = re.compile(r'^\s*(\d{1,2}[a-z]?\.|0\d\)|\d{1,2}\))', re.MULTILINE)
-    for pno in range(len(doc)):
-        page = doc[pno]
-        txt = page.get_text("text", clip=clip)
-        if label_re.search(txt):
-            return txt
+        # Check for numbered proposals
+        label_re = re.compile(r'^\s*(\d{1,2}[a-z]?\.|0\d\)|\d{1,2}\))', re.MULTILINE)
+        if label_re.search(text):
+            return text
 
-    # fallback: first page in specified area
+    # fallback: first page in rectangle
     page = doc[0]
-    return page.get_text("text", clip=clip)
+    rect = fitz.Rect(0, 0, width_pt, height_pt)
+    return page.get_text("text", clip=rect)
 
 # -------------------------------------------------------------
 # 2. Extract proposals from text
@@ -110,9 +110,9 @@ def create_report(results, output_filepath):
 # PIPELINE
 # -------------------------------------------------------------
 print("Extracting notice agenda...")
-notice_text = extract_agenda_text(notice_path, area_width_in=2.9, area_height_in=10)
+notice_text = extract_agenda_text(notice_path, area_height_in=2.9)
 print("Extracting proxy agenda...")
-proxy_text  = extract_agenda_text(proxy_path, area_width_in=5.8, area_height_in=10.5)
+proxy_text  = extract_agenda_text(proxy_path, area_height_in=5.8)
 
 print("Extracting proposals...")
 notice_dict = extract_proposals(notice_text)
