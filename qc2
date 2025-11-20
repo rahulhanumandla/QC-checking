@@ -1,45 +1,51 @@
 import fitz
 import re
 
-proxy_path = r"C:\Users\Hanumandla Rahul\Desktop\PROXY\proxy.pdf"
-notice_path = r"C:\Users\Hanumandla Rahul\Desktop\PROXY\notice.pdf"
-output_pdf = r"C:\Users\Hanumandla Rahul\Desktop\PROXY\Agenda_Comparison_Report.pdf"
+proxy_path = "proxy.pdf"
+notice_path = "notice.pdf"
+output_pdf = "Agenda_Comparison_Report.pdf"
 
-# ----------------------------------------------------------
-# Extract LEFT 7.5 INCH AREA ONLY (ignoring recommendations)
-# ----------------------------------------------------------
-LEFT_LIMIT = 7.5 * 72   # 7.5 inches in PDF points (540 px)
-
-def extract_left_column_text(path):
+# ==============================
+# 1. Find rectangle annotation
+# ==============================
+def get_rect_from_pdf(path):
     doc = fitz.open(path)
-    agenda_text = ""
-
-    # detect proposal pattern
-    label_re = re.compile(r'^\s*(\d{1,2}[a-z]?\.|0\d\)|\d{1,2}\))', re.MULTILINE)
-
     for pno in range(len(doc)):
         page = doc[pno]
-        clip = fitz.Rect(0, 0, LEFT_LIMIT, page.rect.height)
-        text = page.get_text("text", clip=clip)
+        annot = page.first_annot
+        while annot:
+            try:
+                rect = annot.rect
+                if rect:
+                    return pno, rect
+            except:
+                pass
+            annot = annot.next
+    raise ValueError("No rectangle annotation found in → " + path)
 
-        if label_re.search(text):  # agenda detected
-            agenda_text = text
-            return agenda_text
+# ==============================
+# 2. Extract text inside annotation box
+# ==============================
+def get_text_in_rect(path, pno, rect):
+    doc = fitz.open(path)
+    page = doc[pno]
+    return page.get_text("text", clip=rect)
 
-    return ""
+# ==============================
+# 3. Extract proposals from NOTICE (master copy)
+# ==============================
+def extract_notice_items(text):
 
-
-# ----------------------------------------------------------
-# Convert extracted left-column into Proposal Dictionary
-# ----------------------------------------------------------
-def extract_proposals(text):
     label_re = re.compile(r'^\s*(\d{1,2}[a-z]?\.|0\d\)|\d{1,2}\))')
+
     proposals = {}
     current_label = None
+    lines = text.splitlines()
 
-    for line in text.splitlines():
+    for line in lines:
         m = label_re.match(line)
         if m:
+            # new proposal found
             label = m.group(1).strip()
             remainder = line[m.end():].strip()
             proposals[label] = remainder
@@ -48,68 +54,77 @@ def extract_proposals(text):
             if current_label:
                 proposals[current_label] += " " + line.strip()
 
-    # remove double spaces
+    # CLEANUP
     for k in proposals:
         proposals[k] = re.sub(r'\s+', ' ', proposals[k]).strip()
 
     return proposals
 
+# ==============================
+# 4. Extract ALL text (flat) from proxy agenda box
+# ==============================
+def extract_proxy_flat(text):
+    # Collapse text into 1 line for easier searching
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
 
-# ----------------------------------------------------------
-# Compare Proxy vs Notice
-# ----------------------------------------------------------
-def compare(proxy_dict, notice_dict):
-    labels = sorted(set(proxy_dict.keys()) | set(notice_dict.keys()))
+# ==============================
+# 5. Compare NOTICE items against PROXY text
+# ==============================
+def compare_notice_vs_proxy(notice_dict, proxy_flat):
     results = []
 
-    for lbl in labels:
-        p = proxy_dict.get(lbl)
-        n = notice_dict.get(lbl)
+    for lbl, content in notice_dict.items():
 
-        if p is None:
-            results.append((lbl, "MISSING_IN_PROXY"))
-        elif n is None:
-            results.append((lbl, "MISSING_IN_NOTICE"))
-        elif p == n:
+        # Remove label from content for cleaner search
+        clean_notice_text = content.strip()
+
+        # Check if this whole text exists in proxy
+        if clean_notice_text.lower() in proxy_flat.lower():
             results.append((lbl, "MATCH"))
         else:
-            results.append((lbl, f"MISMATCH — Proxy: '{p}'  |  Notice: '{n}'"))
+            results.append((lbl, f"MISMATCH - This text from NOTICE was not found in PROXY → '{clean_notice_text}'"))
 
     return results
 
-
-# ----------------------------------------------------------
-# Create PDF Report ONLY
-# ----------------------------------------------------------
+# ==============================
+# 6. PDF Report
+# ==============================
 def create_report(results, output_path):
     doc = fitz.open()
     page = doc.new_page()
-    y = 40
 
+    y = 40
     page.insert_text((40, 20), "AGENDA COMPARISON REPORT", fontsize=16)
 
     for lbl, status in results:
         if y > 760:
             page = doc.new_page()
             y = 40
+
         page.insert_text((40, y), f"{lbl}: {status}", fontsize=11)
-        y += 20
+        y += 22
 
     doc.save(output_path)
     doc.close()
 
-
-# ----------------------------------------------------------
+# ==============================
 # PIPELINE
-# ----------------------------------------------------------
-proxy_text = extract_left_column_text(proxy_path)
-notice_text = extract_left_column_text(notice_path)
+# ==============================
 
-proxy_dict = extract_proposals(proxy_text)
-notice_dict = extract_proposals(notice_text)
+# 1. Read Notice first (Master)
+n_page, n_rect = get_rect_from_pdf(notice_path)
+notice_text = get_text_in_rect(notice_path, n_page, n_rect)
 
-results = compare(proxy_dict, notice_dict)
+# 2. Read Proxy
+p_page, p_rect = get_rect_from_pdf(proxy_path)
+proxy_text = get_text_in_rect(proxy_path, p_page, p_rect)
+
+notice_dict = extract_notice_items(notice_text)
+proxy_flat = extract_proxy_flat(proxy_text)
+
+results = compare_notice_vs_proxy(notice_dict, proxy_flat)
 
 create_report(results, output_pdf)
 
-print("DONE! Report saved as:", output_pdf)
+print("DONE → Report saved:", output_pdf)
