@@ -1,9 +1,30 @@
-C:\Users\HanumandlaR\OneDrive - Broadridge Financial Solutions, Inc\Desktop\PROXY>python qc.py
-Traceback (most recent call last):
-  File "C:\Users\HanumandlaR\OneDrive - Broadridge Financial Solutions, Inc\Desktop\PROXY\qc.py", line 137, in <module>
-    create_report(results, output_pdf)
-    ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\HanumandlaR\OneDrive - Broadridge Financial Solutions, Inc\Desktop\PROXY\qc.py", line 110, in create_report
-    lines = text_inserted.count("\n") + 1  # at least 1 line
-            ^^^^^^^^^^^^^^^^^^^
-AttributeError: 'float' object has no attribute 'count'
+def create_report(results, output_filepath):
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((40, 20), "AGENDA COMPARISON REPORT", fontsize=16)
+
+    y = 60
+    left_margin = 40
+    right_margin = 550  # Width = 510
+    bottom_margin = 800  # Approx bottom of page
+    spacing = 10  # space between entries
+
+    for label, status in results:
+        text = f"{label}: {status}"
+
+        # Create a rectangle from current y to bottom of page
+        rect = fitz.Rect(left_margin, y, right_margin, bottom_margin)
+
+        # Insert text and get height used
+        height_used = page.insert_textbox(rect, text, fontsize=11)
+
+        # Update y for next entry
+        y += height_used + spacing
+
+        # Start a new page if we reach bottom
+        if y > bottom_margin:
+            page = doc.new_page()
+            y = 40
+
+    doc.save(output_filepath)
+    doc.close()
