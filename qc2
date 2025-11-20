@@ -1,75 +1,80 @@
 import fitz
 import re
-import textwrap
 
 proxy_path = "proxy.pdf"
 notice_path = "notice.pdf"
 output_pdf = "Agenda_Comparison_Report.pdf"
 
+# --------------------------------------------------------
+# 1. Find agenda block by detecting first label like 1., 1a., 01)
+# --------------------------------------------------------
+label_re = re.compile(r'^\s*(\d{1,2}[a-z]?\.|0\d\)|\d{1,2}\))')
 
-# -------------------------
-# Extract full text from a PDF
-# -------------------------
-def extract_full_text(path):
+def extract_agenda_block(path):
     doc = fitz.open(path)
-    full_txt = ""
-    for p in doc:
-        full_txt += p.get_text()
-    return full_txt
+
+    for pno in range(len(doc)):
+        page = doc[pno]
+        lines = page.get_text("text").splitlines()
+
+        collecting = False
+        block = []
+        for ln in lines:
+            if label_re.match(ln):
+                collecting = True
+                block.append(ln)
+            else:
+                if collecting:
+                    block.append(ln)
+
+        # If we collected at least one label, return this block
+        if any(label_re.match(l) for l in block):
+            # remove trailing unrelated language (signature / extra)
+            cleaned = trim_after_last_label(block)
+            return "\n".join(cleaned)
+
+    return ""
 
 
-# -------------------------
-# Stop reading after last proposal label
-# -------------------------
-def trim_after_last_label(text):
-    # A proposal label: 1., 1a., 01), 12)
-    label_re = re.compile(r'^\s*(\d{1,2}[a-z]?\.|0\d\)|\d{1,2}\))', re.MULTILINE)
-    matches = list(label_re.finditer(text))
-
-    if not matches:
-        return text  # no proposals found
-
-    last_match = matches[-1]
-    end_pos = last_match.start()
-
-    # Cut text from last proposal to end
-    trimmed = text[end_pos:]
-
-    # Stop at first large blank block (signature area usually)
-    trimmed = trimmed.split("\n\n")[0]
-
-    return trimmed
+# --------------------------------------------------------
+# 2. Remove everything after last valid label (to stop signature language)
+# --------------------------------------------------------
+def trim_after_last_label(lines):
+    idx = 0
+    for i, ln in enumerate(lines):
+        if label_re.match(ln):
+            idx = i
+    return lines[: idx + 1 + 3]   # allow at most 3 lines after last label (captures note point)
 
 
-# -------------------------
-# Convert agenda text → dictionary(label → text)
-# -------------------------
-def extract_proposals(text):
-    label_re = re.compile(r'^\s*(\d{1,2}[a-z]?\.|0\d\)|\d{1,2}\))')
+# --------------------------------------------------------
+# 3. Convert agenda block into LABEL → TEXT dictionary
+# --------------------------------------------------------
+def extract_dict(block_text):
     proposals = {}
     current_label = None
 
-    for line in text.splitlines():
-        m = label_re.match(line)
+    lines = block_text.splitlines()
+
+    for ln in lines:
+        m = label_re.match(ln)
         if m:
-            label = m.group(1).strip()
-            remainder = line[m.end():].strip()
-            proposals[label] = remainder
-            current_label = label
+            current_label = m.group(1).strip()
+            proposals[current_label] = ln[m.end():].strip()
         else:
             if current_label:
-                proposals[current_label] += " " + line.strip()
+                proposals[current_label] += " " + ln.strip()
 
-    # Normalize spaces
+    # collapse multiple spaces
     for k in proposals:
         proposals[k] = re.sub(r'\s+', ' ', proposals[k]).strip()
 
     return proposals
 
 
-# -------------------------
-# Compare proposals
-# -------------------------
+# --------------------------------------------------------
+# 4. Compare NOTICE → PROXY
+# --------------------------------------------------------
 def compare(notice_dict, proxy_dict):
     labels = sorted(set(notice_dict.keys()) | set(proxy_dict.keys()))
     results = []
@@ -85,60 +90,61 @@ def compare(notice_dict, proxy_dict):
         elif n == p:
             results.append((lbl, "MATCH"))
         else:
-            wrapped_n = "\n".join(textwrap.wrap(n, width=70))
-            wrapped_p = "\n".join(textwrap.wrap(p, width=70))
             results.append((
                 lbl,
-                f"MISMATCH\nNOTICE: {wrapped_n}\nPROXY:  {wrapped_p}"
+                "MISMATCH",
+                f"NOTICE:\n{n}\n\nPROXY:\n{p}"
             ))
 
     return results
 
 
-# -------------------------
-# PDF Report Generator
-# -------------------------
+# --------------------------------------------------------
+# 5. Create PDF report with multi-line mismatch details
+# --------------------------------------------------------
 def create_report(results, output_path):
     doc = fitz.open()
     page = doc.new_page()
     y = 40
-
     page.insert_text((40, 20), "AGENDA COMPARISON REPORT", fontsize=16)
 
-    for lbl, status in results:
-        for line in status.split("\n"):
-            if y > 760:
-                page = doc.new_page()
-                y = 40
+    for res in results:
+        lbl = res[0]
+        status = res[1]
 
-            page.insert_text((40, y), f"{lbl}: {line}", fontsize=11)
-            y += 18
-        y += 10  # spacing between items
+        if y > 760:
+            page = doc.new_page()
+            y = 40
+
+        if status == "MISMATCH":
+            detail = res[2]
+            page.insert_text((40, y), f"{lbl}: {status}", fontsize=12, color=(1,0,0))
+            y += 20
+            for line in detail.split("\n"):
+                page.insert_text((60, y), line, fontsize=10)
+                y += 15
+            y += 10
+
+        else:
+            page.insert_text((40, y), f"{lbl}: {status}", fontsize=11)
+            y += 20
 
     doc.save(output_path)
     doc.close()
 
 
-# -----------------------------------------------------
-# PIPELINE
-# -----------------------------------------------------
+# --------------------------------------------------------
+# RUN PIPELINE
+# --------------------------------------------------------
 
-# Extract text
-notice_raw = extract_full_text(notice_path)
-proxy_raw = extract_full_text(proxy_path)
+notice_block = extract_agenda_block(notice_path)
+proxy_block  = extract_agenda_block(proxy_path)
 
-# Trim signature and extra language
-notice_text = trim_after_last_label(notice_raw)
-proxy_text = trim_after_last_label(proxy_raw)
+notice_dict = extract_dict(notice_block)
+proxy_dict  = extract_dict(proxy_block)
 
-# Convert to dictionaries
-notice_dict = extract_proposals(notice_text)
-proxy_dict = extract_proposals(proxy_text)
-
-# Compare
 results = compare(notice_dict, proxy_dict)
 
-# Report
 create_report(results, output_pdf)
 
-print("DONE! Report saved as:", output_pdf)
+print("DONE! Report created:", output_pdf)
