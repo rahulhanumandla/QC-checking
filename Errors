@@ -1,13 +1,14 @@
 import fitz
 import re
 import textwrap
+import re
 from openai import OpenAI
 
 # ---------------- CONFIG ----------------
 proxy_path = "proxy.pdf"
 notice_path = "notice.pdf"
 output_pdf = "Agenda_Comparison_Report.pdf"
-openai_api_key = "YOUR_OPENAI_API_KEY"  # replace with your key
+openai_api_key = "YOUR_OPENAI_API_KEY"  # Replace with your key
 
 client = OpenAI(api_key=openai_api_key)
 
@@ -29,33 +30,32 @@ def extract_agenda_text(path):
     clip = fitz.Rect(0, 0, cutoff_x, page.rect.height)
     return page.get_text("text", clip=clip)
 
-# ---------------- 2. AI-based line classification ----------------
-def is_proposal_line(line):
+# ---------------- 2. AI batch filtering ----------------
+def ai_filter_proposal(proposal_block):
     """
-    Ask GPT if this line is part of proposal text or extra content.
-    Returns True if it's proposal, False if extra.
+    Send the full proposal block to AI and get only the lines
+    that are part of the proposal description.
     """
-    if not line.strip():
-        return False
-
     prompt = f"""
-    You are given a single line from a corporate proxy/notice PDF.
-    Decide if this line is part of the PROPOSAL description or if it is EXTRA content
-    like voting instructions, nominees, signature, or headers.
-    ONLY answer YES if it's part of the proposal description, NO otherwise.
+    You are given text extracted from a corporate proxy/notice PDF.
+    Some lines may be extra information like nominees, voting instructions, or signatures.
+    Extract ONLY the lines that are part of the actual proposal description.
+    Return them as plain text, preserving the line order.
 
-    Line: \"{line}\"
+    Text:
+    {proposal_block}
     """
     try:
         response = client.chat.completions.create(
             model="gpt-5-mini",
             messages=[{"role": "user", "content": prompt}]
         )
-        answer = response.choices[0].message.content.strip().upper()
-        return "YES" in answer
+        filtered_text = response.choices[0].message.content.strip()
+        return filtered_text
     except Exception as e:
         print("AI error:", e)
-        return True  # fallback to include line if AI fails
+        # fallback: return entire block if AI fails
+        return proposal_block
 
 # ---------------- 3. Extract proposals using AI ----------------
 def extract_proposals(text):
@@ -74,21 +74,17 @@ def extract_proposals(text):
         if m:
             # Save previous proposal
             if current_label and lines_buffer:
-                proposals[current_label] = " ".join(lines_buffer).strip()
+                proposals[current_label] = ai_filter_proposal("\n".join(lines_buffer))
             current_label = m.group(1)
             content = line[m.end():].strip()
             lines_buffer = [content] if content else []
         else:
             if current_label:
-                if is_proposal_line(line):
-                    lines_buffer.append(line)
-                else:
-                    # Stop appending if line is extra content
-                    continue
+                lines_buffer.append(line)
 
     # Save last proposal
     if current_label and lines_buffer:
-        proposals[current_label] = " ".join(lines_buffer).strip()
+        proposals[current_label] = ai_filter_proposal("\n".join(lines_buffer))
 
     # Collapse extra spaces
     for k in proposals:
