@@ -1,115 +1,49 @@
-import fitz
-import re
-import textwrap
+// ---------------- CONFIG ----------------
+var stopKeywords = ["By Order of the Board", "Signature", "Voting", "Nominee"];
+var labelRegex = /^\s*(\d{1,2}[a-z]?\.|0\d\)|\d{1,2}\))/;
 
-proxy_path = "proxy.pdf"
-notice_path = "notice.pdf"
-output_pdf = "Agenda_Comparison_Report.pdf"
+var proposals = [];
 
-# ---------------- 1. Extract proposal blocks ----------------
-def extract_proposals_from_blocks(path):
-    doc = fitz.open(path)
-    proposals = {}
-    
-    # Regex to detect proposal labels
-    label_re = re.compile(r'^\s*(\d{1,2}[a-z]?\.|0\d\)|\d{1,2}\))')
-    
-    # Stop keywords to ignore extra content
-    stop_keywords = re.compile(r'By Order of the Board|Signature|Voting|Nominee', re.IGNORECASE)
-    
-    current_label = None
-    current_text = []
+// Loop through pages
+for (var p = 0; p < this.numPages; p++) {
+    var pageText = this.getPageNthWord(p, 0, true); // Get all text
+    var lines = pageText.split(/\r?\n/);
 
-    for page in doc:
-        blocks = page.get_text("blocks")  # list of text blocks [(x0,y0,x1,y1,text,...)]
-        for b in blocks:
-            text = b[4].strip()
-            if not text:
-                continue
+    var currentLabel = "";
+    var currentText = "";
 
-            # Check for label
-            m = label_re.match(text)
-            if m:
-                # Save previous proposal
-                if current_label and current_text:
-                    proposals[current_label] = " ".join(current_text).strip()
-                current_label = m.group(1)
-                content = text[m.end():].strip()
-                current_text = [content] if content else []
-            else:
-                if current_label:
-                    # Stop if block contains stop keyword
-                    if stop_keywords.search(text):
-                        current_label = None
-                        current_text = []
-                    else:
-                        current_text.append(text)
-    
-    # Save last proposal
-    if current_label and current_text:
-        proposals[current_label] = " ".join(current_text).strip()
+    for (var i = 0; i < lines.length; i++) {
+        var line = lines[i].trim();
+        if (line === "") continue;
 
-    # Normalize spaces
-    for k in proposals:
-        proposals[k] = re.sub(r'\s+', ' ', proposals[k]).strip()
+        // Check if line starts with proposal label
+        var m = line.match(labelRegex);
+        if (m) {
+            // Save previous proposal
+            if (currentLabel !== "" && currentText !== "") {
+                proposals.push({label: currentLabel, text: currentText});
+            }
+            currentLabel = m[1];
+            currentText = line.substring(m[0].length).trim();
+        } else if (currentLabel !== "") {
+            // Stop if line has stop keywords
+            var stop = stopKeywords.some(function(k){ return line.indexOf(k) !== -1; });
+            if (stop) {
+                currentLabel = "";
+                currentText = "";
+            } else {
+                currentText += " " + line;
+            }
+        }
+    }
 
-    return proposals
+    // Save last proposal on page
+    if (currentLabel !== "" && currentText !== "") {
+        proposals.push({label: currentLabel, text: currentText});
+    }
+}
 
-# ---------------- 2. Compare Notice ↔ Proxy ----------------
-def normalize(text):
-    return re.sub(r'\s+', ' ', text).strip()
-
-def compare(notice_dict, proxy_dict):
-    results = []
-    for lbl, n_text in notice_dict.items():
-        p_text = proxy_dict.get(lbl)
-        if p_text is None:
-            results.append((lbl, "MISSING_IN_PROXY"))
-            continue
-        if normalize(n_text) == normalize(p_text):
-            results.append((lbl, "MATCH"))
-        else:
-            results.append((lbl, f"MISMATCH → Notice: '{n_text}' | Proxy: '{p_text}'"))
-    return results
-
-# ---------------- 3. Create report PDF ----------------
-def create_report(results, output_filepath):
-    doc = fitz.open()
-    page = doc.new_page()
-
-    # Title
-    page.insert_text((40, 20), "AGENDA COMPARISON REPORT", fontsize=16)
-
-    left_margin = 40
-    right_margin = 550
-    top_margin = 60
-    bottom_margin = 780
-    font_size = 11
-    line_height = font_size + 3
-    max_chars_per_line = 90
-
-    y = top_margin
-
-    for label, status in results:
-        text = f"{label}: {status}"
-        wrapped_lines = textwrap.wrap(text, width=max_chars_per_line)
-
-        for line in wrapped_lines:
-            if y + line_height > bottom_margin:
-                page = doc.new_page()
-                y = 40
-            page.insert_text((left_margin, y), line, fontsize=font_size)
-            y += line_height
-        y += 5
-
-    doc.save(output_filepath)
-    doc.close()
-
-# ---------------- 4. Pipeline ----------------
-notice_dict = extract_proposals_from_blocks(notice_path)
-proxy_dict  = extract_proposals_from_blocks(proxy_path)
-
-results = compare(notice_dict, proxy_dict)
-create_report(results, output_pdf)
-
-print("DONE! Saved as", output_pdf)
+// ---------------- OUTPUT ----------------
+for (var j = 0; j < proposals.length; j++) {
+    console.println(proposals[j].label + ": " + proposals[j].text);
+}
