@@ -3,96 +3,113 @@ import re
 
 proxy_path = r"C:\Users\Hanumandla Rahul\Desktop\PROXY\proxy.pdf"
 notice_path = r"C:\Users\Hanumandla Rahul\Desktop\PROXY\notice.pdf"
-output_pdf = r"C:\Users\Hanumandla Rahul\Desktop\PROXY\QC_REPORT.pdf"
+output_pdf = r"C:\Users\Hanumandla Rahul\Desktop\PROXY\Agenda_Comparison_Report.pdf"
 
-# ----------------------------------------------
-# STEP 1 → Extract FULL text from each PDF page
-# ----------------------------------------------
-def extract_all_text(path):
+# ----------------------------------------------------------
+# Extract LEFT 7.5 INCH AREA ONLY (ignoring recommendations)
+# ----------------------------------------------------------
+LEFT_LIMIT = 7.5 * 72   # 7.5 inches in PDF points (540 px)
+
+def extract_left_column_text(path):
     doc = fitz.open(path)
-    full = ""
-    for page in doc:
-        full += page.get_text("text") + "\n"
-    return full
+    agenda_text = ""
 
-proxy_text = extract_all_text(proxy_path)
-notice_text = extract_all_text(notice_path)
+    # detect proposal pattern
+    label_re = re.compile(r'^\s*(\d{1,2}[a-z]?\.|0\d\)|\d{1,2}\))', re.MULTILINE)
 
-# ------------------------------------------------------------
-# STEP 2 → Extract ONLY proposals using label-based detection
-# ------------------------------------------------------------
-label_pattern = re.compile(
-    r'^\s*((?:\d{1,2}(?:[a-z])?\.|0\d\)|\d{1,2}\)))', re.MULTILINE
-)
+    for pno in range(len(doc)):
+        page = doc[pno]
+        clip = fitz.Rect(0, 0, LEFT_LIMIT, page.rect.height)
+        text = page.get_text("text", clip=clip)
 
+        if label_re.search(text):  # agenda detected
+            agenda_text = text
+            return agenda_text
+
+    return ""
+
+
+# ----------------------------------------------------------
+# Convert extracted left-column into Proposal Dictionary
+# ----------------------------------------------------------
 def extract_proposals(text):
-    lines = text.splitlines()
+    label_re = re.compile(r'^\s*(\d{1,2}[a-z]?\.|0\d\)|\d{1,2}\))')
     proposals = {}
     current_label = None
-    buffer = []
 
-    for line in lines:
-        m = label_pattern.match(line)
+    for line in text.splitlines():
+        m = label_re.match(line)
         if m:
-            if current_label:
-                proposals[current_label] = " ".join(buffer).strip()
-
-            current_label = m.group(1).strip()
-            content = line[m.end():].strip()
-            buffer = [content] if content else []
-
+            label = m.group(1).strip()
+            remainder = line[m.end():].strip()
+            proposals[label] = remainder
+            current_label = label
         else:
             if current_label:
-                buffer.append(line.strip())
+                proposals[current_label] += " " + line.strip()
 
-    if current_label:
-        proposals[current_label] = " ".join(buffer).strip()
+    # remove double spaces
+    for k in proposals:
+        proposals[k] = re.sub(r'\s+', ' ', proposals[k]).strip()
 
     return proposals
 
-proxy_props = extract_proposals(proxy_text)
-notice_props = extract_proposals(notice_text)
 
-# ------------------------------------------------
-# STEP 3 → Compare EXACT text for each label
-# ------------------------------------------------
-all_labels = list(proxy_props.keys()) + [
-    x for x in notice_props.keys() if x not in proxy_props
-]
+# ----------------------------------------------------------
+# Compare Proxy vs Notice
+# ----------------------------------------------------------
+def compare(proxy_dict, notice_dict):
+    labels = sorted(set(proxy_dict.keys()) | set(notice_dict.keys()))
+    results = []
 
-results = []
+    for lbl in labels:
+        p = proxy_dict.get(lbl)
+        n = notice_dict.get(lbl)
 
-for label in all_labels:
-    p = proxy_props.get(label, "")
-    n = notice_props.get(label, "")
+        if p is None:
+            results.append((lbl, "MISSING_IN_PROXY"))
+        elif n is None:
+            results.append((lbl, "MISSING_IN_NOTICE"))
+        elif p == n:
+            results.append((lbl, "MATCH"))
+        else:
+            results.append((lbl, f"MISMATCH — Proxy: '{p}'  |  Notice: '{n}'"))
 
-    if p == "" and n != "":
-        results.append((label, "MISSING_IN_PROXY"))
+    return results
 
-    elif p != "" and n == "":
-        results.append((label, "MISSING_IN_NOTICE"))
 
-    elif p == n:
-        results.append((label, "MATCH"))
+# ----------------------------------------------------------
+# Create PDF Report ONLY
+# ----------------------------------------------------------
+def create_report(results, output_path):
+    doc = fitz.open()
+    page = doc.new_page()
+    y = 40
 
-    else:
-        results.append((label, "MISMATCH: TEXT_DIFFERENCE"))
+    page.insert_text((40, 20), "AGENDA COMPARISON REPORT", fontsize=16)
 
-# ------------------------------------------------
-# STEP 4 → Create the REPORT PDF
-# ------------------------------------------------
-doc = fitz.open()
-page = doc.new_page()
+    for lbl, status in results:
+        if y > 760:
+            page = doc.new_page()
+            y = 40
+        page.insert_text((40, y), f"{lbl}: {status}", fontsize=11)
+        y += 20
 
-y = 40
-page.insert_text((40, 20), "PROXY vs NOTICE – QC REPORT", fontsize=14)
+    doc.save(output_path)
+    doc.close()
 
-for label, status in results:
-    line = f"{label}  →  {status}"
-    page.insert_text((40, y), line, fontsize=10)
-    y += 15
 
-doc.save(output_pdf)
-doc.close()
+# ----------------------------------------------------------
+# PIPELINE
+# ----------------------------------------------------------
+proxy_text = extract_left_column_text(proxy_path)
+notice_text = extract_left_column_text(notice_path)
 
-print("QC Report generated:", output_pdf)
+proxy_dict = extract_proposals(proxy_text)
+notice_dict = extract_proposals(notice_text)
+
+results = compare(proxy_dict, notice_dict)
+
+create_report(results, output_pdf)
+
+print("DONE! Report saved as:", output_pdf)
