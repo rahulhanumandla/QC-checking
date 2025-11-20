@@ -1,131 +1,123 @@
 import fitz
 import re
 
-PROXY_FILE = "proxy.pdf"
-NOTICE_FILE = "notice.pdf"
-OUTPUT_PDF = "comparison_report.pdf"
+proxy_path = "proxy.pdf"
+notice_path = "notice.pdf"
+output_pdf = "Agenda_Comparison_Report.pdf"
 
-LEFT_LIMIT = 540     # 7.5 inches × 72 dpi
-
-# -----------------------------
-# Extract left-side text (agenda area)
-# -----------------------------
-def extract_left_text(path):
+# -------------------------
+# 1. Extract rectangle from annotations
+# -------------------------
+def get_rect_from_pdf(path):
     doc = fitz.open(path)
-    label_re = re.compile(r'^\s*(\d{1,2}(?:[a-z])?\.|0\d\)|\d{1,2}\))', re.MULTILINE)
-
     for pno in range(len(doc)):
         page = doc[pno]
-        clip = fitz.Rect(0, 0, LEFT_LIMIT, page.rect.height)
-        txt = page.get_text("text", clip=clip)
+        annot = page.first_annot
+        while annot:
+            rect = annot.rect
+            if rect:  
+                return pno, rect
+            annot = annot.next
+    raise ValueError("No rectangle annotation found!")
 
-        if label_re.search(txt):
-            return txt
+# -------------------------
+# 2. Extract text inside the rectangle only
+# -------------------------
+def get_text_in_rect(path, pno, rect):
+    doc = fitz.open(path)
+    page = doc[pno]
+    txt = page.get_text("text", clip=rect)
+    return txt
 
-    # fallback if no agenda detected
-    page = doc[0]
-    clip = fitz.Rect(0, 0, LEFT_LIMIT, page.rect.height)
-    return page.get_text("text", clip=clip)
-
-
-# -----------------------------
-# Convert text into proposal entries
-# -----------------------------
-def split_proposals(text):
+# -------------------------
+# 3. Split into label → text dictionary
+# -------------------------
+def extract_proposals(text):
+    label_re = re.compile(r'^\s*(\d{1,2}[a-z]?\.|0\d\)|\d{1,2}\))')
+    proposals = {}
+    current_label = None
     lines = text.splitlines()
-    proposals = []
-    cur_label = None
-    buf = []
 
-    label_pat = re.compile(r'^\s*(\d{1,2}(?:[a-z])?\.|0\d\)|\d{1,2}\))')
-
-    for ln in lines:
-        m = label_pat.match(ln)
+    for line in lines:
+        m = label_re.match(line)
         if m:
-            if cur_label:
-                proposals.append((cur_label, " ".join(buf).strip()))
-            cur_label = m.group(1).strip()
-            content = ln[m.end():].strip()
-            buf = [content] if content else []
+            label = m.group(1).strip()
+            remainder = line[m.end():].strip()
+            proposals[label] = remainder
+            current_label = label
         else:
-            if cur_label:
-                buf.append(ln.strip())
+            if current_label:
+                proposals[current_label] += " " + line.strip()
 
-    if cur_label:
-        proposals.append((cur_label, " ".join(buf).strip()))
+    # cleanup repeated spaces
+    for k in proposals:
+        proposals[k] = re.sub(r'\s+', ' ', proposals[k]).strip()
 
     return proposals
 
-
-# -----------------------------
-# Compare logic
-# -----------------------------
-def compare(proxy, notice):
-    proxy_dict = {p[0]: p[1] for p in proxy}
-    notice_dict = {p[0]: p[1] for p in notice}
-
-    all_labels = sorted(set(proxy_dict.keys()) | set(notice_dict.keys()))
-
+# -------------------------
+# 4. Compare proxy vs notice
+# -------------------------
+def compare(proxy_dict, notice_dict):
+    labels = sorted(set(proxy_dict.keys()) | set(notice_dict.keys()))
     results = []
-    for lbl in all_labels:
+
+    for lbl in labels:
         p = proxy_dict.get(lbl)
         n = notice_dict.get(lbl)
 
         if p is None:
-            results.append((lbl, "MISSING_IN_PROXY", "Label missing in Proxy"))
+            results.append((lbl, "MISSING_IN_PROXY"))
         elif n is None:
-            results.append((lbl, "MISSING_IN_NOTICE", "Label missing in Notice"))
+            results.append((lbl, "MISSING_IN_NOTICE"))
         elif p == n:
-            results.append((lbl, "MATCH", ""))
+            results.append((lbl, "MATCH"))
         else:
-            results.append((lbl, "MISMATCH", f"Proxy: {p}\nNotice: {n}"))
+            results.append((lbl, f"MISMATCH — Proxy: '{p}'  |  Notice: '{n}'"))
 
     return results
 
-
-# -----------------------------
-# Create PDF report
-# -----------------------------
-def create_report(results):
+# -------------------------
+# 5. Generate a PDF-only report
+# -------------------------
+def create_report(results, output_path):
     doc = fitz.open()
     page = doc.new_page()
 
-    y = 50
-    page.insert_text((30, 20), "Proxy vs Notice – Comparison Report", fontsize=14, fontname="helv")
+    y = 40
+    page.insert_text((40, 20), "AGENDA COMPARISON REPORT", fontsize=16)
 
-    for lbl, status, reason in results:
-        color = (0, 0.6, 0) if status == "MATCH" else \
-                (1, 0, 0) if status == "MISMATCH" else \
-                (1, 0.5, 0)
-
-        page.insert_text((30, y), f"{lbl} → {status}", fontsize=11, color=color)
-
-        if reason:
-            lines = reason.split("\n")
-            for ln in lines:
-                y += 14
-                page.insert_text((50, y), ln, fontsize=9)
-
-        y += 20
-        if y > 750:  # new page
+    for lbl, status in results:
+        if y > 760:
             page = doc.new_page()
             y = 40
 
-    doc.save(OUTPUT_PDF)
+        page.insert_text((40, y), f"{lbl}: {status}", fontsize=11)
+        y += 20
+
+    doc.save(output_path)
     doc.close()
 
+# -----------------------------------------------------
+# PIPELINE
+# -----------------------------------------------------
 
-# -----------------------------
-# MAIN
-# -----------------------------
-proxy_text = extract_left_text(PROXY_FILE)
-notice_text = extract_left_text(NOTICE_FILE)
+# Extract rectangles
+p_page, p_rect = get_rect_from_pdf(proxy_path)
+n_page, n_rect = get_rect_from_pdf(notice_path)
 
-proxy_entries = split_proposals(proxy_text)
-notice_entries = split_proposals(notice_text)
+# Extract agenda-only text
+proxy_text = get_text_in_rect(proxy_path, p_page, p_rect)
+notice_text = get_text_in_rect(notice_path, n_page, n_rect)
 
-results = compare(proxy_entries, notice_entries)
+# Convert into dictionaries
+proxy_dict = extract_proposals(proxy_text)
+notice_dict = extract_proposals(notice_text)
 
-create_report(results)
+# Compare
+results = compare(proxy_dict, notice_dict)
 
-print("Comparison completed →", OUTPUT_PDF)
+# PDF Report
+create_report(results, output_pdf)
+
+print("DONE! Report saved as:", output_pdf)
