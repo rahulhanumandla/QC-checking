@@ -1,0 +1,98 @@
+import fitz
+import re
+
+proxy_path = r"C:\Users\Hanumandla Rahul\Desktop\PROXY\proxy.pdf"
+notice_path = r"C:\Users\Hanumandla Rahul\Desktop\PROXY\notice.pdf"
+output_pdf = r"C:\Users\Hanumandla Rahul\Desktop\PROXY\QC_REPORT.pdf"
+
+# ----------------------------------------------
+# STEP 1 → Extract FULL text from each PDF page
+# ----------------------------------------------
+def extract_all_text(path):
+    doc = fitz.open(path)
+    full = ""
+    for page in doc:
+        full += page.get_text("text") + "\n"
+    return full
+
+proxy_text = extract_all_text(proxy_path)
+notice_text = extract_all_text(notice_path)
+
+# ------------------------------------------------------------
+# STEP 2 → Extract ONLY proposals using label-based detection
+# ------------------------------------------------------------
+label_pattern = re.compile(
+    r'^\s*((?:\d{1,2}(?:[a-z])?\.|0\d\)|\d{1,2}\)))', re.MULTILINE
+)
+
+def extract_proposals(text):
+    lines = text.splitlines()
+    proposals = {}
+    current_label = None
+    buffer = []
+
+    for line in lines:
+        m = label_pattern.match(line)
+        if m:
+            if current_label:
+                proposals[current_label] = " ".join(buffer).strip()
+
+            current_label = m.group(1).strip()
+            content = line[m.end():].strip()
+            buffer = [content] if content else []
+
+        else:
+            if current_label:
+                buffer.append(line.strip())
+
+    if current_label:
+        proposals[current_label] = " ".join(buffer).strip()
+
+    return proposals
+
+proxy_props = extract_proposals(proxy_text)
+notice_props = extract_proposals(notice_text)
+
+# ------------------------------------------------
+# STEP 3 → Compare EXACT text for each label
+# ------------------------------------------------
+all_labels = list(proxy_props.keys()) + [
+    x for x in notice_props.keys() if x not in proxy_props
+]
+
+results = []
+
+for label in all_labels:
+    p = proxy_props.get(label, "")
+    n = notice_props.get(label, "")
+
+    if p == "" and n != "":
+        results.append((label, "MISSING_IN_PROXY"))
+
+    elif p != "" and n == "":
+        results.append((label, "MISSING_IN_NOTICE"))
+
+    elif p == n:
+        results.append((label, "MATCH"))
+
+    else:
+        results.append((label, "MISMATCH: TEXT_DIFFERENCE"))
+
+# ------------------------------------------------
+# STEP 4 → Create the REPORT PDF
+# ------------------------------------------------
+doc = fitz.open()
+page = doc.new_page()
+
+y = 40
+page.insert_text((40, 20), "PROXY vs NOTICE – QC REPORT", fontsize=14)
+
+for label, status in results:
+    line = f"{label}  →  {status}"
+    page.insert_text((40, y), line, fontsize=10)
+    y += 15
+
+doc.save(output_pdf)
+doc.close()
+
+print("QC Report generated:", output_pdf)
