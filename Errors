@@ -4,26 +4,29 @@ def create_report(results, output_filepath):
     page.insert_text((40, 20), "AGENDA COMPARISON REPORT", fontsize=16)
 
     y = 60
-    max_width = 510  # Width of text box
     left_margin = 40
-    right_margin = left_margin + max_width
-    line_height = 14
+    right_margin = 550  # Width = 510
+    bottom_margin = 800  # Approx bottom of page
+    line_spacing = 14
 
     for label, status in results:
         text = f"{label}: {status}"
 
-        # Wrap text manually using textwrap
-        wrapped_text = "\n".join(textwrap.wrap(text, width=90))
+        # Create a rectangle that spans from current y to bottom margin
+        rect = fitz.Rect(left_margin, y, right_margin, bottom_margin)
 
-        # Estimate needed height
-        needed_height = wrapped_text.count("\n") * line_height + 10
-        if y + needed_height > 760:
+        # Insert text; fitz will wrap it automatically in the rectangle
+        text_inserted = page.insert_textbox(rect, text, fontsize=11)
+
+        # Update y for next entry
+        # Estimate number of lines inserted
+        lines = text_inserted.count("\n") + 1  # at least 1 line
+        y += lines * line_spacing + 10
+
+        # If we reach bottom, start a new page
+        if y > bottom_margin:
             page = doc.new_page()
             y = 40
-
-        rect = fitz.Rect(left_margin, y, right_margin, y + needed_height)
-        page.insert_textbox(rect, wrapped_text, fontsize=11)  # removed 'wrap' argument
-        y += needed_height + 10
 
     doc.save(output_filepath)
     doc.close()
