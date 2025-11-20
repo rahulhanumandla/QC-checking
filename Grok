@@ -1,160 +1,137 @@
 import fitz
 import re
+import textwrap
 
 proxy_path = "proxy.pdf"
 notice_path = "notice.pdf"
 output_pdf = "Agenda_Comparison_Report.pdf"
 
 # -------------------------------------------------------------
-# 1. Extract left agenda + stop before signatures
+# 1. Extract ONLY the left agenda area (first 7.5 inches)
 # -------------------------------------------------------------
 def extract_agenda_text(path):
     doc = fitz.open(path)
+
+    # Convert inches to points (1 inch = 72 points)
     cutoff_x = 7.5 * 72
-    stop_keywords = {"sincerely", "yours truly", "/s/", "secretary", "chairman", "president", "dated", "by:"}
+
+    # Find the first page that contains proposal labels
+    label_re = re.compile(r'^\s*(\d{1,2}[a-z]?\.|0\d\)|\d{1,2}\))', re.MULTILINE)
 
     for pno in range(len(doc)):
         page = doc[pno]
         clip = fitz.Rect(0, 0, cutoff_x, page.rect.height)
-        text = page.get_text("text", clip=clip)
+        txt = page.get_text("text", clip=clip)
 
-        lines = []
-        for line in text.splitlines():
-            lower = line.lower()
-            if any(kw in lower for kw in stop_keywords):
-                break
-            lines.append(line)
-        if lines and any(re.search(r'\d+[a-z]?\.', line) for line in lines):
-            return "\n".join(lines)
+        if label_re.search(txt):
+            return txt
 
-    # fallback
+    # fallback: return page 1 left area
     page = doc[0]
     clip = fitz.Rect(0, 0, cutoff_x, page.rect.height)
     return page.get_text("text", clip=clip)
 
 # -------------------------------------------------------------
-# 2. Extract proposals
+# 2. Extract proposals from text
 # -------------------------------------------------------------
 def extract_proposals(text):
     proposals = {}
     current = None
-    pattern = re.compile(r'^\s*(0?\d{1,2}[a-z]?)[.)]\s+')
+
+    # Label pattern detects 1. , 1a. , 01) , 1) etc.
+    pattern = re.compile(r'^\s*(\d{1,2}[a-z]?\.|0\d\)|\d{1,2}\))')
 
     for line in text.splitlines():
-        line = line.rstrip()
+        line = line.strip()
+        if not line:
+            continue
+
         m = pattern.match(line)
         if m:
-            raw_label = m.group(1)
-            label = re.sub(r'^0+', '', raw_label)      # 01 → 1
+            label = m.group(1)
             content = line[m.end():].strip()
             proposals[label] = content
             current = label
         else:
-            if current and line.strip():
-                proposals[current] += " " + line.strip()
+            if current:
+                proposals[current] += " " + line
 
+    # collapse extra spaces
     for k in proposals:
         proposals[k] = re.sub(r'\s+', ' ', proposals[k]).strip()
+
     return proposals
 
 # -------------------------------------------------------------
-# 3. Compare
+# 3. Compare Notice → Proxy (Notice is master)
 # -------------------------------------------------------------
 def compare(notice_dict, proxy_dict):
     results = []
-    all_labels = sorted({*notice_dict.keys(), *proxy_dict.keys()},
-                        key=lambda x: (len(x), x))
 
-    for lbl in all_labels:
-        n = notice_dict.get(lbl, "").strip()
-        p = proxy_dict.get(lbl, "").strip()
+    for lbl, n_text in notice_dict.items():
+        p_text = proxy_dict.get(lbl)
 
-        if lbl not in notice_dict:
-            results.append((lbl, "EXTRA_IN_PROXY"))
-        elif lbl not in proxy_dict:
+        if p_text is None:
             results.append((lbl, "MISSING_IN_PROXY"))
-        elif n == p:
+            continue
+
+        if n_text == p_text:
             results.append((lbl, "MATCH"))
         else:
-            results.append((lbl, f"MISMATCH\nNotice: {n}\nProxy : {p}"))
+            results.append((lbl, f"MISMATCH → Notice: '{n_text}' | Proxy: '{p_text}'"))
+
     return results
 
 # -------------------------------------------------------------
-# 4. Create report – FIXED bold error + proper wrapping
+# 4. Create report PDF with multi-line wrapped text
 # -------------------------------------------------------------
 def create_report(results, output_filepath):
     doc = fitz.open()
-    page = doc.new_page()                     # US Letter
-    margin = 60
-    y = 70
-    line_h = 18
+    page = doc.new_page()
+    page.insert_text((40, 20), "AGENDA COMPARISON REPORT", fontsize=16)
 
-    # Title (bold using built-in Helvetica-Bold)
-    page.insert_text((margin, 40), "AGENDA COMPARISON REPORT", 
-                     fontsize=16, fontname="helvb")   # helvb = Helvetica Bold
-
-    # Use TextWriter for full control (supports color + bold)
-    tw = fitz.TextWriter(page.rect, color=(0,0,0))
-
-    bold_font = fitz.Font("helvb")   # Helvetica Bold
-    regular_font = fitz.Font("helv")
+    y = 60
+    max_width = 510  # Width of text box
+    left_margin = 40
+    right_margin = left_margin + max_width
+    line_height = 14
 
     for label, status in results:
-        if y > 760:
-            tw.write_text(page)
+        text = f"{label}: {status}"
+
+        # Wrap text to approx 90 chars per line
+        wrapped_text = "\n".join(textwrap.wrap(text, width=90))
+
+        # Check if we need a new page
+        needed_height = wrapped_text.count("\n") * line_height + 10
+        if y + needed_height > 760:
             page = doc.new_page()
-            tw = fitz.TextWriter(page.rect)
-            y = 60
+            y = 40
 
-        prefix = f"{label}: "
-        color = (0, 0.5, 0) if status == "MATCH" else (0.8, 0, 0)
+        rect = fitz.Rect(left_margin, y, right_margin, y + needed_height)
+        page.insert_textbox(rect, wrapped_text, fontsize=11, wrap=1)
+        y += needed_height + 10
 
-        # Write bold label
-        tw.append((margin, y), prefix, font=bold_font, fontsize=11, color=color)
-
-        x_after_label = margin + bold_font.text_length(prefix, fontsize=11) + 5
-
-        if "\n" in status:
-            lines = status.split("\n")
-            for i, line in enumerate(lines):
-                if i == 0:
-                    text = line
-                else:
-                    text = line
-                    x_after_label = margin + 40  # indent Notice/Proxy lines
-
-                # Auto-wrap long lines
-                rect = fitz.Rect(x_after_label, y - 10, 540, y + 20)
-                tw.fill_textbox(rect, text, font=regular_font, fontsize=10, color=color)
-                y += line_h
-        else:
-            # Single line (MATCH, MISSING, EXTRA)
-            rect = fitz.Rect(x_after_label, y - 10, 540, y + 20)
-            tw.fill_textbox(rect, status, font=regular_font, fontsize=11, color=color)
-
-        y += 12  # spacing between items
-
-    # Footer
-    tw.append((margin, 820), "Generated automatically – Notice is source of truth",
-              fontsize=9, color=(0.5, 0.5, 0.5))
-
-    tw.write_text(page)
-    doc.save(output_pdf, garbage=3, deflate=True)
+    doc.save(output_filepath)
     doc.close()
+
 
 # -------------------------------------------------------------
 # PIPELINE
 # -------------------------------------------------------------
+
+# Extract agenda text
 notice_text = extract_agenda_text(notice_path)
 proxy_text  = extract_agenda_text(proxy_path)
 
+# Convert to dictionaries
 notice_dict = extract_proposals(notice_text)
 proxy_dict  = extract_proposals(proxy_text)
 
-print("Notice items:", sorted(notice_dict.keys()))
-print("Proxy items :", sorted(proxy_dict.keys()))
-
+# Compare
 results = compare(notice_dict, proxy_dict)
+
+# Report
 create_report(results, output_pdf)
 
-print(f"\nDONE! Report saved as → {output_pdf}")
+print("DONE! Saved as", output_pdf)
