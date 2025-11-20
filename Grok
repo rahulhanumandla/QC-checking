@@ -1,21 +1,22 @@
 import fitz
+import openai
 import re
 import textwrap
+import json
 
+# ------------------- CONFIG -------------------
 proxy_path = "proxy.pdf"
 notice_path = "notice.pdf"
 output_pdf = "Agenda_Comparison_Report.pdf"
 
-# -------------------------------------------------------------
-# 1. Extract ONLY the left agenda area (first 7.5 inches)
-# -------------------------------------------------------------
+# Set your OpenAI API key
+openai.api_key = "YOUR_API_KEY"
+
+# ------------------- 1. Extract left agenda area -------------------
 def extract_agenda_text(path):
     doc = fitz.open(path)
+    cutoff_x = 7.5 * 72  # first 7.5 inches
 
-    # Convert inches to points (1 inch = 72 points)
-    cutoff_x = 7.5 * 72
-
-    # Find the first page that contains proposal labels
     label_re = re.compile(r'^\s*(\d{1,2}[a-z]?\.|0\d\)|\d{1,2}\))', re.MULTILINE)
 
     for pno in range(len(doc)):
@@ -26,45 +27,44 @@ def extract_agenda_text(path):
         if label_re.search(txt):
             return txt
 
-    # fallback: return page 1 left area
+    # fallback: first page left area
     page = doc[0]
     clip = fitz.Rect(0, 0, cutoff_x, page.rect.height)
     return page.get_text("text", clip=clip)
 
-# -------------------------------------------------------------
-# 2. Extract proposals from text
-# -------------------------------------------------------------
-def extract_proposals(text):
-    proposals = {}
-    current = None
+# ------------------- 2. Use GPT to extract proposals -------------------
+def extract_proposals_with_gpt(text):
+    prompt = f"""
+You are an assistant for reading proxy agendas.
+Extract ONLY the numbered proposals from the text below.
+Ignore everything else like recommendations, company info, signatures, and voting instructions.
+Return the results as a JSON object where keys are labels and values are the proposal text.
 
-    # Label pattern detects 1. , 1a. , 01) , 1) etc.
-    pattern = re.compile(r'^\s*(\d{1,2}[a-z]?\.|0\d\)|\d{1,2}\))')
+Text:
+\"\"\"{text}\"\"\"
+"""
 
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0
+        )
+        json_text = response['choices'][0]['message']['content']
 
-        m = pattern.match(line)
-        if m:
-            label = m.group(1)
-            content = line[m.end():].strip()
-            proposals[label] = content
-            current = label
-        else:
-            if current:
-                proposals[current] += " " + line
+        # Sometimes GPT adds extra text before/after JSON, extract JSON part
+        json_start = json_text.find("{")
+        json_end = json_text.rfind("}") + 1
+        proposals = json.loads(json_text[json_start:json_end])
 
-    # collapse extra spaces
-    for k in proposals:
-        proposals[k] = re.sub(r'\s+', ' ', proposals[k]).strip()
+        # Ensure all values are strings
+        proposals = {k: str(v).strip() for k, v in proposals.items()}
+        return proposals
+    except Exception as e:
+        print("GPT extraction error:", e)
+        return {}
 
-    return proposals
-
-# -------------------------------------------------------------
-# 3. Compare Notice → Proxy (Notice is master)
-# -------------------------------------------------------------
+# ------------------- 3. Compare Notice → Proxy -------------------
 def compare(notice_dict, proxy_dict):
     results = []
 
@@ -82,56 +82,56 @@ def compare(notice_dict, proxy_dict):
 
     return results
 
-# -------------------------------------------------------------
-# 4. Create report PDF with multi-line wrapped text
-# -------------------------------------------------------------
+# ------------------- 4. Create PDF report -------------------
 def create_report(results, output_filepath):
     doc = fitz.open()
     page = doc.new_page()
+
+    # Title
     page.insert_text((40, 20), "AGENDA COMPARISON REPORT", fontsize=16)
 
-    y = 60
-    max_width = 510  # Width of text box
+    # Margins and settings
     left_margin = 40
-    right_margin = left_margin + max_width
-    line_height = 14
+    right_margin = 550
+    top_margin = 60
+    bottom_margin = 780
+    font_size = 11
+    line_height = font_size + 3
+    max_chars_per_line = 90
+
+    y = top_margin
 
     for label, status in results:
         text = f"{label}: {status}"
+        wrapped_lines = textwrap.wrap(text, width=max_chars_per_line)
 
-        # Wrap text to approx 90 chars per line
-        wrapped_text = "\n".join(textwrap.wrap(text, width=90))
+        for line in wrapped_lines:
+            if y + line_height > bottom_margin:
+                page = doc.new_page()
+                y = 40
 
-        # Check if we need a new page
-        needed_height = wrapped_text.count("\n") * line_height + 10
-        if y + needed_height > 760:
-            page = doc.new_page()
-            y = 40
+            page.insert_text((left_margin, y), line, fontsize=font_size)
+            y += line_height
 
-        rect = fitz.Rect(left_margin, y, right_margin, y + needed_height)
-        page.insert_textbox(rect, wrapped_text, fontsize=11, wrap=1)
-        y += needed_height + 10
+        y += 5  # small space after each proposal
 
     doc.save(output_filepath)
     doc.close()
 
-
-# -------------------------------------------------------------
-# PIPELINE
-# -------------------------------------------------------------
-
-# Extract agenda text
+# ------------------- PIPELINE -------------------
+print("Extracting notice agenda...")
 notice_text = extract_agenda_text(notice_path)
+print("Extracting proxy agenda...")
 proxy_text  = extract_agenda_text(proxy_path)
 
-# Convert to dictionaries
-notice_dict = extract_proposals(notice_text)
-proxy_dict  = extract_proposals(proxy_text)
+print("Extracting proposals using GPT...")
+notice_dict = extract_proposals_with_gpt(notice_text)
+proxy_dict  = extract_proposals_with_gpt(proxy_text)
 
-# Compare
+print("Comparing proposals...")
 results = compare(notice_dict, proxy_dict)
 
-# Report
+print("Generating report PDF...")
 create_report(results, output_pdf)
 
 print("DONE! Saved as", output_pdf)
