@@ -1,96 +1,86 @@
 import fitz
-import openai
 import re
 import textwrap
-import json
 
-# ------------------- CONFIG -------------------
 proxy_path = "proxy.pdf"
 notice_path = "notice.pdf"
 output_pdf = "Agenda_Comparison_Report.pdf"
 
-# Set your OpenAI API key
-openai.api_key = "YOUR_API_KEY"
-
-# ------------------- 1. Extract left agenda area -------------------
-def extract_agenda_text(path):
+# -------------------------------------------------------------
+# 1. Extract ONLY the agenda area (custom rectangle)
+# -------------------------------------------------------------
+def extract_agenda_text(path, area_width_in, area_height_in):
     doc = fitz.open(path)
-    cutoff_x = 7.5 * 72  # first 7.5 inches
 
+    # Convert inches to points (1 inch = 72 points)
+    width_pt = area_width_in * 72
+    height_pt = area_height_in * 72
+
+    # Assume agenda starts from top-left corner
+    clip = fitz.Rect(0, 0, width_pt, height_pt)
+
+    # Find the first page that contains numbered proposals
     label_re = re.compile(r'^\s*(\d{1,2}[a-z]?\.|0\d\)|\d{1,2}\))', re.MULTILINE)
-
     for pno in range(len(doc)):
         page = doc[pno]
-        clip = fitz.Rect(0, 0, cutoff_x, page.rect.height)
         txt = page.get_text("text", clip=clip)
-
         if label_re.search(txt):
             return txt
 
-    # fallback: first page left area
+    # fallback: first page in specified area
     page = doc[0]
-    clip = fitz.Rect(0, 0, cutoff_x, page.rect.height)
     return page.get_text("text", clip=clip)
 
-# ------------------- 2. Use GPT to extract proposals -------------------
-def extract_proposals_with_gpt(text):
-    prompt = f"""
-You are an assistant for reading proxy agendas.
-Extract ONLY the numbered proposals from the text below.
-Ignore everything else like recommendations, company info, signatures, and voting instructions.
-Return the results as a JSON object where keys are labels and values are the proposal text.
+# -------------------------------------------------------------
+# 2. Extract proposals from text
+# -------------------------------------------------------------
+def extract_proposals(text):
+    proposals = {}
+    current = None
+    pattern = re.compile(r'^\s*(\d{1,2}[a-z]?\.|0\d\)|\d{1,2}\))')
 
-Text:
-\"\"\"{text}\"\"\"
-"""
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        m = pattern.match(line)
+        if m:
+            label = m.group(1)
+            content = line[m.end():].strip()
+            proposals[label] = content
+            current = label
+        else:
+            if current:
+                proposals[current] += " " + line
 
-    try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0
-        )
-        json_text = response['choices'][0]['message']['content']
+    # collapse extra spaces
+    for k in proposals:
+        proposals[k] = re.sub(r'\s+', ' ', proposals[k]).strip()
+    return proposals
 
-        # Sometimes GPT adds extra text before/after JSON, extract JSON part
-        json_start = json_text.find("{")
-        json_end = json_text.rfind("}") + 1
-        proposals = json.loads(json_text[json_start:json_end])
-
-        # Ensure all values are strings
-        proposals = {k: str(v).strip() for k, v in proposals.items()}
-        return proposals
-    except Exception as e:
-        print("GPT extraction error:", e)
-        return {}
-
-# ------------------- 3. Compare Notice → Proxy -------------------
+# -------------------------------------------------------------
+# 3. Compare Notice → Proxy (Notice is master)
+# -------------------------------------------------------------
 def compare(notice_dict, proxy_dict):
     results = []
-
     for lbl, n_text in notice_dict.items():
         p_text = proxy_dict.get(lbl)
-
         if p_text is None:
             results.append((lbl, "MISSING_IN_PROXY"))
-            continue
-
-        if n_text == p_text:
+        elif n_text == p_text:
             results.append((lbl, "MATCH"))
         else:
             results.append((lbl, f"MISMATCH → Notice: '{n_text}' | Proxy: '{p_text}'"))
-
     return results
 
-# ------------------- 4. Create PDF report -------------------
+# -------------------------------------------------------------
+# 4. Create PDF report with multi-line wrapped text
+# -------------------------------------------------------------
 def create_report(results, output_filepath):
     doc = fitz.open()
     page = doc.new_page()
-
-    # Title
     page.insert_text((40, 20), "AGENDA COMPARISON REPORT", fontsize=16)
 
-    # Margins and settings
     left_margin = 40
     right_margin = 550
     top_margin = 60
@@ -100,7 +90,6 @@ def create_report(results, output_filepath):
     max_chars_per_line = 90
 
     y = top_margin
-
     for label, status in results:
         text = f"{label}: {status}"
         wrapped_lines = textwrap.wrap(text, width=max_chars_per_line)
@@ -109,24 +98,25 @@ def create_report(results, output_filepath):
             if y + line_height > bottom_margin:
                 page = doc.new_page()
                 y = 40
-
             page.insert_text((left_margin, y), line, fontsize=font_size)
             y += line_height
 
-        y += 5  # small space after each proposal
+        y += 5  # small space between proposals
 
     doc.save(output_filepath)
     doc.close()
 
-# ------------------- PIPELINE -------------------
+# -------------------------------------------------------------
+# PIPELINE
+# -------------------------------------------------------------
 print("Extracting notice agenda...")
-notice_text = extract_agenda_text(notice_path)
+notice_text = extract_agenda_text(notice_path, area_width_in=2.9, area_height_in=10)
 print("Extracting proxy agenda...")
-proxy_text  = extract_agenda_text(proxy_path)
+proxy_text  = extract_agenda_text(proxy_path, area_width_in=5.8, area_height_in=10.5)
 
-print("Extracting proposals using GPT...")
-notice_dict = extract_proposals_with_gpt(notice_text)
-proxy_dict  = extract_proposals_with_gpt(proxy_text)
+print("Extracting proposals...")
+notice_dict = extract_proposals(notice_text)
+proxy_dict  = extract_proposals(proxy_text)
 
 print("Comparing proposals...")
 results = compare(notice_dict, proxy_dict)
