@@ -1,1 +1,176 @@
 
+import fitz
+import re
+
+proxy_path = "proxy.pdf"
+notice_path = "notice.pdf"
+output_pdf = "Agenda_Comparison_Report.pdf"
+
+# -------------------------------------------------------------
+# 1. Extract ONLY the left agenda area (first 7.5 inches)
+# -------------------------------------------------------------
+def extract_agenda_text(path):
+    doc = fitz.open(path)
+    cutoff_x = 7.5 * 72  # 7.5 inches
+    label_re = re.compile(r'^\s*\d{1,2}[a-z]?\.\s|^\s*\d{1,2}\)\s|^\s*0\d\)\s', re.MULTILINE)
+    
+    for pno in range(len(doc)):
+        page = doc[pno]
+        clip = fitz.Rect(0, 0, cutoff_x, page.rect.height)
+        txt = page.get_text("text", clip=clip)
+        if label_re.search(txt):
+            # Stop extracting once we hit signature/block section
+            lines = txt.splitlines()
+            cleaned_lines = []
+            stop_keywords = {
+                "sincerely", "yours truly", "secretary", "chief executive officer",
+                "chairman", "president", "vice president", "/s/", "dated", "by:"
+            }
+            for line in lines:
+                lower = line.lower()
+                if any(kw in lower for kw in stop_keywords):
+                    break
+                if "agenda" in lower and "meeting" in lower:
+                    continue  # skip header lines if needed
+                cleaned_lines.append(line)
+            return "\n".join(cleaned_lines)
+    
+    # fallback
+    page = doc[0]
+    clip = fitz.Rect(0, 0, cutoff_x, page.rect.height)
+    return page.get_text("text", clip=clip)
+
+# -------------------------------------------------------------
+# 2. Extract proposals
+# -------------------------------------------------------------
+def extract_proposals(text):
+    proposals = {}
+    current = None
+    pattern = re.compile(r'^\s*(\d{1,2}[a-z]?\.|0?\d{1,2}\))\s+')
+
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+
+        m = pattern.match(line)
+        if m:
+            label = m.group(1).rstrip('.)')
+            content = line[m.end():].strip()
+            # Normalize label: "01)" → "1", "1a." → "1a"
+            label = re.sub(r'^0+', '', label)
+            proposals[label] = content
+            current = label
+        else:
+            if current and line:
+                proposals[current] += " " + line
+
+    # Clean up extra spaces
+    for k in list(proposals.keys()):
+        proposals[k] = re.sub(r'\s+', ' ', proposals[k]).strip()
+
+    return proposals
+
+# -------------------------------------------------------------
+# 3. Compare
+# -------------------------------------------------------------
+def compare(notice_dict, proxy_dict):
+    results = []
+    all_labels = sorted(set(notice_dict.keys()) | set(proxy_dict.keys()),
+                        key=lambda x: (len(x), x))
+
+    for lbl in all_labels:
+        n_text = notice_dict.get(lbl, "").strip()
+        p_text = proxy_dict.get(lbl, "").strip()
+
+        if lbl not in notice_dict:
+            results.append((lbl, "EXTRA_IN_PROXY"))
+        elif lbl not in proxy_dict:
+            results.append((lbl, "MISSING_IN_PROXY"))
+        elif n_text == p_text:
+            results.append((lbl, "MATCH"))
+        else:
+            results.append((lbl, f"MISMATCH\nNotice: {n_text}\nProxy : {p_text}"))
+    return results
+
+# -------------------------------------------------------------
+# 4. Create report with proper text wrapping (FIXED!)
+# -------------------------------------------------------------
+def create_report(results, output_filepath):
+    doc = fitz.open()
+    page = doc.new_page()
+    left_margin = 50
+    right_margin = 550
+    y = 70
+    line_height = 18
+
+    # Title
+    page.insert_text((left_margin, 40), "AGENDA COMPARISON REPORT", fontsize=16, fontname="helv", bold=True)
+
+    for label, status in results:
+        if y > 780:
+            page = doc.new_page()
+            y = 50
+
+        # Format the text block
+        if "MISMATCH" in status:
+            lines = status.split("\n")
+            prefix = f"{label}: "
+            color = (0.8, 0, 0)  # red
+        elif "MISSING" in status:
+            prefix = f"{label}: "
+            lines = [status]
+            color = (0.8, 0, 0)
+        elif "EXTRA" in status:
+            prefix = f"{label}: "
+            lines = [status]
+            color = (0.8, 0.5, 0)
+        else:
+            prefix = f"{label}: "
+            lines = [status]
+            color = (0, 0.5, 0)  # green
+
+        # First line with label
+        page.insert_text((left_margin, y), prefix, fontsize=11, fontname="helv", bold=True, color=color)
+        x_offset = left_margin + page.get_text_length(prefix + " ", fontsize=11)
+
+        # Rest with proper wrapping
+        remaining_space = right_margin - x_offset
+        for i, line in enumerate(lines):
+            if i == 0 and "MISMATCH" in status:
+                text_to_wrap = line.split(":", 1)[1] if ":" in line else line
+            else:
+                text_to_wrap = line
+
+            wrapped = page.get_textbox_dropped(text_to_wrap, fitz.Rect(x_offset, y-10, right_margin, y+10))
+            for wrapped_line in wrapped:
+                page.insert_text((x_offset if i > 0 or "MISMATCH" not in status else left_margin + 20, y), 
+                                wrapped_line, fontsize=10, color=color)
+                y += line_height
+
+            y += 8  # extra spacing between Notice/Proxy lines
+
+        y += 10  # spacing after each item
+
+    # Footer
+    page.insert_text((left_margin, 820), "Generated automatically – Notice is source of truth", fontsize=9, color=(0.5,0.5,0.5))
+
+    doc.save(output_filepath)
+    doc.close()
+
+# -------------------------------------------------------------
+# PIPELINE
+# -------------------------------------------------------------
+notice_text = extract_agenda_text(notice_path)
+proxy_text = extract_agenda_text(proxy_path)
+
+notice_dict = extract_proposals(notice_text)
+proxy_dict = extract_proposals(proxy_text)
+
+print("Notice items:", sorted(notice_dict.keys()))
+print("Proxy items :", sorted(proxy_dict.keys()))
+
+results = compare(notice_dict, proxy_dict)
+create_report(results, output_pdf)
+
+print(f"\nDONE! Report saved: {output_pdf}")
