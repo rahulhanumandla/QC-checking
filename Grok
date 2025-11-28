@@ -158,7 +158,7 @@ def search_in_proxy(notice_text, proxy_full_text):
                 best_similarity = 0.85
                 best_match = "Key phrase found in proxy"
     
-    if best_similarity > 0.7:
+    if best_similarity > 0.95:  # Much stricter threshold
         return (True, best_similarity, best_match[:200])
     else:
         return (False, best_similarity, "No match found")
@@ -175,12 +175,12 @@ def compare_notice_to_proxy(notice_items, proxy_text):
     for label, notice_content in notice_items.items():
         found, similarity, proxy_snippet = search_in_proxy(notice_content, proxy_text)
         
-        if found and similarity >= 0.95:
+        if found and similarity >= 0.98:  # Stricter: 98%+ for exact match
             status = "✓ EXACT MATCH"
-        elif found and similarity >= 0.7:
-            status = f"⚠ PARTIAL MATCH ({similarity:.0%})"
+        elif found and similarity >= 0.95:  # 95-98% = close match
+            status = f"⚠ CLOSE MATCH ({similarity:.1%})"
         else:
-            status = "✗ NOT FOUND IN PROXY"
+            status = "✗ NOT FOUND / MISMATCH"
         
         results.append({
             'label': label,
@@ -261,9 +261,9 @@ def create_report(results, output_pdf):
         add_text(f"Item {result['label']}", size=12, bold=True)
         add_text(f"Status: {result['status']}", color=color)
         
-        # Notice text
+        # Notice text (show FULL text, not truncated)
         add_text("NOTICE TEXT:", size=10, bold=True)
-        add_text(result['notice_text'][:300] + "..." if len(result['notice_text']) > 300 else result['notice_text'], size=9)
+        add_text(result['notice_text'], size=9)
         
         # Findings
         if '✗' in result['status']:
