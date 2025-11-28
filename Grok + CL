@@ -1,0 +1,195 @@
+import fitz
+import re
+from difflib import SequenceMatcher
+
+# ---------------------------
+# FILE PATHS
+# ---------------------------
+NOTICE_PDF = r"C:\Users\Hanumandla Rahul\Desktop\PROXY\notice.pdf"
+PROXY_PDF  = r"C:\Users\Hanumandla Rahul\Desktop\PROXY\proxy.pdf"
+OUTPUT_PDF = r"C:\Users\Hanumandla Rahul\Desktop\PROXY\SMART_QC_REPORT.pdf"
+
+def inch_to_pt(x): return x * 72
+
+# Notice: Narrow to avoid recommendation column
+NOTICE_PAGE = 1
+NOTICE_Y0 = inch_to_pt(2.9)
+NOTICE_Y1 = inch_to_pt(10.0)
+NOTICE_X1 = inch_to_pt(5.8)
+
+# Proxy: Full width
+PROXY_PAGE = 0
+PROXY_Y0 = inch_to_pt(5.7)
+PROXY_Y1 = inch_to_pt(10.0)
+PROXY_X1 = inch_to_pt(8.5)
+
+# ---------------------------
+# 1. Extract text
+# ---------------------------
+def extract_text_area(pdf_path, page_no, x0, y0, x1, y1):
+    doc = fitz.open(pdf_path)
+    page = doc[page_no]
+    clip = fitz.Rect(x0, y0, x1, y1)
+    text = page.get_text("text", clip=clip)
+    doc.close()
+    return text
+
+# ---------------------------
+# 2. Aggressive cleaning (remove noise)
+# ---------------------------
+def aggressive_clean(text):
+    text = re.sub(r'\b(FOR|AGAINST|ABSTAIN)\b.*', '', text, flags=re.I)
+    text = re.sub(r'Board.*recommend.*', '', text, flags=re.I)
+    text = re.sub(r'Resolution.*?(Ordinary|Special).*?Resolution[:\.]', '', text, flags=re.I)
+    text = re.sub(r'To consider.+?following resolution[:\.]', '', text, flags=re.I)
+    text = re.sub(r'as an?\s+(Ordinary|Special)\s+Resolution[:\.]?', '', text, flags=re.I)
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip().lower()
+
+# ---------------------------
+# 3. Extract Notice items (robust)
+# ---------------------------
+def extract_notice_items(text):
+    items = {}
+    current_label = None
+    current_lines = []
+
+    for line in text.split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+
+        # Detect numbered item: 1. 2) 1a. etc.
+        match = re.match(r'^(\d{1,2}[a-z]?\.?\s*[\.)]?\s*)', line)
+        if match:
+            if current_label and current_lines:
+                full = ' '.join(current_lines)
+                items[current_label] = aggressive_clean(full)
+            current_label = match.group(1).strip('. )')
+            current_lines = [line[match.end():].strip()]
+        else:
+            if current_label:
+                current_lines.append(line)
+
+    if current_label and current_lines:
+        items[current_label] = aggressive_clean(' '.join(current_lines))
+
+    return items
+
+# ---------------------------
+# 4. SMART MATCHING (This is the key fix!)
+# ---------------------------
+def smart_match_score(notice_text, proxy_text):
+    n = notice_text.lower()
+    p = proxy_text.lower()
+
+    # Key phrase extraction (first 15 + last 15 words)
+    n_words = n.split()
+    if len(n_words) < 10:
+        return 0.0
+
+    start_phrase = ' '.join(n_words[:15])
+    end_phrase = ' '.join(n_words[-15:]) if len(n_words) > 20 else start_phrase
+    core_phrase = ' '.join(n_words[5:-5]) if len(n_words) > 20 else start_phrase
+
+    phrases = [start_phrase, end_phrase, core_phrase]
+    best = 0.0
+
+    for phrase in phrases:
+        if phrase in p:
+            # If any strong phrase is found → high confidence
+            return 0.98 + SequenceMatcher(None, n, p).ratio() * 0.02
+
+    # Fallback: overall similarity
+    ratio = SequenceMatcher(None, n, p).ratio()
+    if ratio > 0.82:
+        return ratio
+    if ratio > 0.75 and any(word in p for word in n_words[::3]):  # every 3rd word
+        return 0.80
+
+    return ratio
+
+# ---------------------------
+# 5. Main comparison
+# ---------------------------
+def compare_with_smart_matching(notice_items, proxy_text):
+    proxy_clean = aggressive_clean(proxy_text)
+    results = []
+
+    for label, notice_content in notice_items.items():
+        score = smart_match_score(notice_content, proxy_clean)
+
+        if score >= 0.95:
+            status = "EXACT MATCH"
+            color = (0, 0.5, 0)
+        elif score >= 0.85:
+            status = "VERY CLOSE MATCH"
+            color = (0.1, 0.6, 0.1)
+        elif score >= 0.75:
+            status = "GOOD MATCH (Minor Rephrasing)"
+            color = (0.8, 0.6, 0)
+        else:
+            status = "NOT FOUND / MISMATCH"
+            color = (0.8, 0, 0)
+
+        results.append({
+            'label': label,
+            'status': status,
+            'score': round(score, 3),
+            'notice_text': notice_content[:500] + "..." if len(notice_content) > 500 else notice_content,
+            'color': color
+        })
+
+    return results
+
+# ---------------------------
+# 6. Generate clean report (no font issues)
+# ---------------------------
+def create_report(results, output_pdf):
+    doc = fitz.open()
+    page = doc.new_page()
+
+    y = 50
+    def write(text, size=11, bold=False, color=(0,0,0)):
+        nonlocal y, page
+        if y > 780:
+            page = doc.new_page()
+            y = 50
+        font = "Helvetica-Bold" if bold else "Helvetica"
+        for line in [text[i:i+90] for i in range(0, len(text), 90)]:
+            page.insert_text((50, y), line, fontsize=size, fontname=font, color=color)
+            y += size + 4
+
+    write("NOTICE vs PROXY - STRICT QC REPORT", 18, bold=True, color=(0,0,0.7))
+    write(f"Total Items in Notice: {len(results)}", 12, bold=True)
+    y += 20
+
+    ok = sum(1 for r in results if "MATCH" in r['status'])
+    write(f"Matched: {ok}  |  Issues: {len(results)-ok}", 12, bold=True)
+    y += 20
+
+    for r in results:
+        write(f"Item {r['label']}", 13, bold=True, color=(0,0,0.8))
+        write(f"→ {r['status']} (Score: {r['score']})", 11, bold=True, color=r['color'])
+        write(f"   Notice: {r['notice_text']}", 9)
+        y += 10
+
+    doc.save(output_pdf)
+    doc.close()
+
+# ---------------------------
+# RUN
+# ---------------------------
+print("Starting Smart QC...")
+
+notice_text = extract_text_area(NOTICE_PDF, NOTICE_PAGE, 0, NOTICE_Y0, NOTICE_X1, NOTICE_Y1)
+proxy_text  = extract_text_area(PROXY_PDF,  PROXY_PAGE,  0, PROXY_Y0,  PROXY_X1,  PROXY_Y1)
+
+notice_items = extract_notice_items(notice_text)
+print(f"Found {len(notice_items)} items in Notice")
+
+results = compare_with_smart_matching(notice_items, proxy_text)
+create_report(results, OUTPUT_PDF)
+
+print(f"\nDONE! Report saved: {OUTPUT_PDF}")
+print(f"Matched: {sum(1 for r in results if 'MATCH' in r['status'])} / {len(results)}")
