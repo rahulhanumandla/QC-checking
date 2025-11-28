@@ -1,0 +1,159 @@
+import fitz  # PyMuPDF
+import re
+
+# ---------------------------
+# FILE PATHS
+# ---------------------------
+NOTICE_PDF = r"C:\Users\Hanumandla Rahul\Desktop\PROXY\notice.pdf"
+PROXY_PDF = r"C:\Users\Hanumandla Rahul\Desktop\PROXY\proxy.pdf"
+OUTPUT_PDF = r"C:\Users\Hanumandla Rahul\Desktop\PROXY\STRICT_QC_REPORT.pdf"
+
+# ---------------------------
+# DIMENSIONS (inches → points)
+# ---------------------------
+def inch_to_pt(x):
+    return x * 72
+
+# Notice (2nd page)
+NOTICE_PAGE = 1  # zero-indexed
+NOTICE_Y0 = inch_to_pt(2.9)
+NOTICE_Y1 = inch_to_pt(10.0)
+NOTICE_X1 = inch_to_pt(7.5)  # ignore recommendation column
+
+# Proxy (1st page)
+PROXY_PAGE = 0
+PROXY_Y0 = inch_to_pt(5.7)
+PROXY_Y1 = inch_to_pt(10.0)
+PROXY_X1 = inch_to_pt(7.5)  # full width for agenda text
+
+# ---------------------------
+# 1. Extract relevant text area
+# ---------------------------
+def extract_text_area(pdf_path, page_no, x1, y0, y1):
+    doc = fitz.open(pdf_path)
+    page = doc[page_no]
+    clip = fitz.Rect(0, y0, x1, y1)
+    text = page.get_text("text", clip=clip)
+    doc.close()
+    return text
+
+# ---------------------------
+# 2. Extract proposals
+# ---------------------------
+def extract_proposals(text):
+    """
+    Returns dict {label: content}
+    Unnumbered text stored under 'Intro'
+    """
+    proposals = {}
+    current_label = "Intro"
+
+    # Pattern for numbered proposals: 1., 1a., 01), 2) etc.
+    pattern = re.compile(r'^(\d{1,2}[a-z]?\.|0\d\)|\d{1,2}\))')
+
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        m = pattern.match(line)
+        if m:
+            current_label = m.group(1)
+            proposals[current_label] = line[m.end():].strip()
+        else:
+            proposals.setdefault(current_label, "")
+            if proposals[current_label]:
+                proposals[current_label] += " " + line
+            else:
+                proposals[current_label] = line
+
+    # collapse extra spaces
+    for k in proposals:
+        proposals[k] = re.sub(r'\s+', ' ', proposals[k]).strip()
+
+    return proposals
+
+# ---------------------------
+# 3. Compare notice vs proxy
+# ---------------------------
+def compare_proposals(notice_dict, proxy_dict):
+    results = []
+    for label, n_text in notice_dict.items():
+        p_text = proxy_dict.get(label)
+        if not p_text:
+            results.append((label, f"MISMATCH → Missing in proxy"))
+            continue
+        if n_text == p_text:
+            results.append((label, "MATCH"))
+        else:
+            results.append((label, f"MISMATCH → Notice: '{n_text}' | Proxy: '{p_text}'"))
+    return results
+
+# ---------------------------
+# 4. Generate report PDF (FIXED multi-line output)
+# ---------------------------
+def create_report(results, output_pdf):
+    doc = fitz.open()
+    page = doc.new_page()
+
+    # Title
+    page.insert_text((40, 30), "STRICT QC REPORT: NOTICE → PROXY", fontsize=16)
+
+    # Page settings
+    y = 70
+    left_margin = 40
+    right_margin = 550
+    max_width = right_margin - left_margin
+    fontsize = 11
+
+    def wrap_text(text, font="helv", size=11):
+        """Wrap text to fit inside max_width."""
+        words = text.split()
+        lines = []
+        current = ""
+
+        for word in words:
+            test = current + " " + word if current else word
+            w = fitz.get_text_length(test, fontname=font, fontsize=size)
+            if w <= max_width:
+                current = test
+            else:
+                lines.append(current)
+                current = word
+        if current:
+            lines.append(current)
+
+        return lines
+
+    # Write each result
+    for label, status in results:
+
+        full_text = f"{label}: {status}"
+        wrapped_lines = wrap_text(full_text, size=fontsize)
+
+        for line in wrapped_lines:
+
+            # New page if required
+            if y > 780:
+                page = doc.new_page()
+                y = 40
+
+            page.insert_text((left_margin, y), line, fontsize=fontsize)
+            y += 18  # line spacing
+
+    doc.save(output_pdf)
+    doc.close()
+
+
+# ---------------------------
+# PIPELINE
+# ---------------------------
+notice_text = extract_text_area(NOTICE_PDF, NOTICE_PAGE, NOTICE_X1, NOTICE_Y0, NOTICE_Y1)
+proxy_text = extract_text_area(PROXY_PDF, PROXY_PAGE, PROXY_X1, PROXY_Y0, PROXY_Y1)
+
+notice_dict = extract_proposals(notice_text)
+proxy_dict = extract_proposals(proxy_text)
+
+results = compare_proposals(notice_dict, proxy_dict)
+create_report(results, OUTPUT_PDF)
+
+print("STRICT QC REPORT GENERATED:", OUTPUT_PDF)
