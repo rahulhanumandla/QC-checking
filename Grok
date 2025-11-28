@@ -1,8 +1,6 @@
 import fitz  # PyMuPDF
 import re
 from difflib import SequenceMatcher
-from dataclasses import dataclass
-from typing import List, Dict, Tuple
 
 # ---------------------------
 # FILE PATHS
@@ -12,169 +10,72 @@ PROXY_PDF = r"C:\Users\Hanumandla Rahul\Desktop\PROXY\proxy.pdf"
 OUTPUT_PDF = r"C:\Users\Hanumandla Rahul\Desktop\PROXY\SMART_QC_REPORT.pdf"
 
 # ---------------------------
-# CONFIGURATION
+# DIMENSIONS (inches → points)
 # ---------------------------
-@dataclass
-class ExtractionConfig:
-    """Configuration for text extraction from documents"""
-    page_no: int
-    y0_inches: float
-    y1_inches: float
-    x1_inches: float = 7.5
-    
-    def to_rect(self) -> fitz.Rect:
-        return fitz.Rect(0, self.y0_inches * 72, self.x1_inches * 72, self.y1_inches * 72)
+def inch_to_pt(x):
+    return x * 72
 
-NOTICE_CONFIG = ExtractionConfig(page_no=1, y0_inches=2.9, y1_inches=10.0)
-PROXY_CONFIG = ExtractionConfig(page_no=0, y0_inches=5.7, y1_inches=10.0)
+# Notice (2nd page) - narrow to avoid recommendation column
+NOTICE_PAGE = 1
+NOTICE_Y0 = inch_to_pt(2.9)
+NOTICE_Y1 = inch_to_pt(10.0)
+NOTICE_X0 = 0
+NOTICE_X1 = inch_to_pt(5.5)  # Narrower to exclude "Board Recommends" column
 
-# Similarity threshold (0-1): lower = more strict
-SIMILARITY_THRESHOLD = 0.85
-
-# ---------------------------
-# DATA STRUCTURES
-# ---------------------------
-@dataclass
-class ProposalItem:
-    """Represents a single proposal/item from the document"""
-    label: str
-    text: str
-    original_text: str  # Keep original for reporting
-    item_type: str  # 'proposal', 'director', 'resolution', etc.
-
-@dataclass
-class ComparisonResult:
-    """Results of comparing notice and proxy items"""
-    label: str
-    status: str  # 'MATCH', 'MISMATCH', 'MISSING', 'EXTRA'
-    notice_text: str
-    proxy_text: str
-    similarity: float
-    differences: List[str]
-    item_type: str
+# Proxy (1st page) - full width for searching
+PROXY_PAGE = 0
+PROXY_Y0 = inch_to_pt(5.7)
+PROXY_Y1 = inch_to_pt(10.0)
+PROXY_X0 = 0
+PROXY_X1 = inch_to_pt(8.0)  # Full width
 
 # ---------------------------
-# 1. SMART TEXT EXTRACTION
+# 1. Extract text from specific area
 # ---------------------------
-def extract_text_area(pdf_path: str, config: ExtractionConfig) -> str:
-    """Extract text from specified area of PDF"""
+def extract_text_area(pdf_path, page_no, x0, y0, x1, y1):
     doc = fitz.open(pdf_path)
-    page = doc[config.page_no]
-    text = page.get_text("text", clip=config.to_rect())
+    page = doc[page_no]
+    clip = fitz.Rect(x0, y0, x1, y1)
+    text = page.get_text("text", clip=clip)
     doc.close()
     return text
 
 # ---------------------------
-# 2. INTELLIGENT ITEM DETECTION & CLEANING
+# 2. Clean boilerplate patterns
 # ---------------------------
-def clean_boilerplate(text: str) -> str:
-    """Remove boilerplate content like recommendations, voting instructions, signatures"""
+def clean_text(text):
+    """Remove common boilerplate that appears in both docs"""
+    # Remove voting instructions
+    text = re.sub(r'\bFOR\b\s+\bAGAINST\b\s+\bABSTAIN\b', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\[\s*\]\s*FOR\s*\[\s*\]\s*AGAINST\s*\[\s*\]\s*ABSTAIN', '', text, flags=re.IGNORECASE)
     
-    # Patterns to remove (case-insensitive)
-    remove_patterns = [
-        # Recommendations
-        r'(?:the\s+)?board\s+(?:of\s+directors\s+)?recommends?\s+(?:a\s+)?vote\s+[^\n.]*',
-        r'(?:the\s+)?board\s+recommends?\s+(?:that\s+you\s+)?(?:vote\s+)?["\']?(?:for|against)["\']?[^\n.]*',
-        r'recommendation:\s*[^\n]*',
-        r'vote\s+required:\s*[^\n]*',
-        r'required\s+vote:\s*[^\n]*',
-        
-        # Voting headers/instructions
-        r'for\s+against\s+abstain',
-        r'please\s+mark\s+here',
-        r'check\s+the\s+appropriate\s+box',
-        r'mark\s+only\s+one\s+box',
-        r'[\[\]☐☑✓✗]\s*for\s*[\[\]☐☑✓✗]\s*against\s*[\[\]☐☑✓✗]\s*abstain',
-        
-        # Signature blocks
-        r'signature\s*:?\s*[^\n]*',
-        r'sign\s+here\s*:?[^\n]*',
-        r'dated?\s*:?\s*[^\n]*',
-        r'date\s*:?\s*[^\n]*',
-        r'please\s+sign\s+exactly[^\n]*',
-        r'when\s+signing\s+as[^\n]*',
-        
-        # Form instructions
-        r'important:?\s*please\s+sign[^\n]*',
-        r'to\s+vote,?\s+mark\s+blocks[^\n]*',
-        r'please\s+vote,?\s+date\s+and\s+sign[^\n]*',
-        r'this\s+proxy\s+must\s+be\s+signed[^\n]*',
-        r'please\s+fold\s+and\s+detach[^\n]*',
-        r'detach\s+here[^\n]*',
-        r'proxy\s+card[^\n]*',
-        
-        # Page numbers and references
-        r'page\s+\d+\s+of\s+\d+',
-        r'see\s+reverse\s+side',
-        r'continued\s+on\s+next\s+page',
-    ]
+    # Remove recommendation phrases
+    text = re.sub(r'(?:the\s+)?board(?:\s+of\s+directors)?\s+recommends?\s+(?:a\s+)?vote\s+(?:for|against)[^\n.]*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'recommendation:\s*(?:for|against)', '', text, flags=re.IGNORECASE)
     
-    cleaned = text
-    for pattern in remove_patterns:
-        cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE | re.MULTILINE)
+    # Remove signature blocks
+    text = re.sub(r'signature[:\s]+[_\s]*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'date[:\s]+[_\s]*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'please\s+sign[^\n]*', '', text, flags=re.IGNORECASE)
     
-    # Remove multiple spaces/newlines
-    cleaned = re.sub(r'\n\s*\n', '\n', cleaned)
-    cleaned = re.sub(r'\s+', ' ', cleaned)
-    
-    return cleaned.strip()
-
-def detect_item_type(text: str) -> str:
-    """Detect what type of item this is (proposal, director, resolution, etc.)"""
-    text_lower = text.lower()
-    
-    # Priority-based detection
-    if any(word in text_lower for word in ['elect', 'director', 'board', 'nominee']):
-        return 'DIRECTOR'
-    elif any(word in text_lower for word in ['ratif', 'appoint', 'auditor', 'accountant']):
-        return 'AUDITOR'
-    elif any(word in text_lower for word in ['compensation', 'remuneration', 'pay']):
-        return 'COMPENSATION'
-    elif any(word in text_lower for word in ['amend', 'amendment', 'charter', 'bylaws', 'articles']):
-        return 'AMENDMENT'
-    elif any(word in text_lower for word in ['approve', 'adopt', 'plan']):
-        return 'PLAN/APPROVAL'
-    elif any(word in text_lower for word in ['sharehold', 'stockholder', 'proposal']):
-        return 'SHAREHOLDER_PROPOSAL'
-    else:
-        return 'GENERAL'
-
-def normalize_text(text: str) -> str:
-    """Normalize text for comparison (remove extra spaces, standardize)"""
     # Remove extra whitespace
     text = re.sub(r'\s+', ' ', text)
-    # Remove common variations
-    text = text.replace('–', '-').replace('—', '-')
-    # Standardize quotes
-    text = text.replace('"', '"').replace('"', '"').replace(''', "'").replace(''', "'")
     return text.strip()
 
-def extract_proposals(text: str) -> List[ProposalItem]:
+# ---------------------------
+# 3. Extract proposals from Notice
+# ---------------------------
+def extract_notice_items(text):
     """
-    Intelligently extract proposals/items from text.
-    Handles various numbering schemes and formats.
-    CLEANS OUT boilerplate content like recommendations, voting instructions, signatures.
+    Extract numbered items from Notice.
+    Returns dict: {label: cleaned_text}
     """
-    # First, clean boilerplate from entire text
-    text = clean_boilerplate(text)
-    
-    proposals = []
-    current_label = "INTRO"
+    items = {}
+    current_label = None
     current_text = []
     
-    # Enhanced patterns for different numbering schemes
-    patterns = [
-        r'^(PROPOSAL\s+\d+[A-Z]?:)',  # PROPOSAL 1:
-        r'^(PROPOSAL\s+NO\.\s+\d+[A-Z]?:)',  # PROPOSAL NO. 1:
-        r'^(\d{1,2}[a-z]?\.)',  # 1., 1a., 12.
-        r'^(0\d\))',  # 01), 02)
-        r'^(\d{1,2}\))',  # 1), 2)
-        r'^(Item\s+\d+[a-z]?:)',  # Item 1:
-        r'^(Resolution\s+\d+:)',  # Resolution 1:
-        r'^([A-Z]\.\s)',  # A., B.
-    ]
-    
-    combined_pattern = re.compile('|'.join(patterns), re.IGNORECASE)
+    # Patterns for proposal numbering
+    number_pattern = re.compile(r'^(\d{1,2}[a-z]?[\.)]\s*)', re.MULTILINE)
     
     lines = text.split('\n')
     
@@ -182,187 +83,144 @@ def extract_proposals(text: str) -> List[ProposalItem]:
         line = line.strip()
         if not line:
             continue
-            
-        match = combined_pattern.match(line)
         
+        # Check if this line starts a new item
+        match = number_pattern.match(line)
         if match:
             # Save previous item
-            if current_text:
+            if current_label and current_text:
                 full_text = ' '.join(current_text)
-                # Clean boilerplate from this specific item too
-                full_text = clean_boilerplate(full_text)
-                
-                if full_text:  # Only add if there's content after cleaning
-                    proposals.append(ProposalItem(
-                        label=current_label,
-                        text=normalize_text(full_text),
-                        original_text=full_text,
-                        item_type=detect_item_type(full_text)
-                    ))
+                items[current_label] = clean_text(full_text)
             
             # Start new item
-            current_label = match.group(0).strip()
-            current_text = [line[match.end():].strip()]
+            current_label = match.group(1).strip()
+            current_text = [line[match.end():]]
         else:
-            # Continuation of current item
-            current_text.append(line)
+            # Continue current item
+            if current_label:
+                current_text.append(line)
     
-    # Don't forget the last item
-    if current_text:
+    # Save last item
+    if current_label and current_text:
         full_text = ' '.join(current_text)
-        # Clean boilerplate from this specific item too
-        full_text = clean_boilerplate(full_text)
-        
-        if full_text:  # Only add if there's content after cleaning
-            proposals.append(ProposalItem(
-                label=current_label,
-                text=normalize_text(full_text),
-                original_text=full_text,
-                item_type=detect_item_type(full_text)
-            ))
+        items[current_label] = clean_text(full_text)
     
-    return proposals
+    return items
 
 # ---------------------------
-# 3. SMART COMPARISON ENGINE
+# 4. Search for Notice text in Proxy
 # ---------------------------
-def calculate_similarity(text1: str, text2: str) -> float:
-    """Calculate similarity ratio between two texts"""
-    return SequenceMatcher(None, text1, text2).ratio()
-
-def find_key_differences(text1: str, text2: str) -> List[str]:
-    """Identify key differences between two texts"""
-    differences = []
-    
-    # Word-level comparison
-    words1 = set(text1.split())
-    words2 = set(text2.split())
-    
-    missing_in_proxy = words1 - words2
-    extra_in_proxy = words2 - words1
-    
-    if missing_in_proxy:
-        differences.append(f"Missing words: {', '.join(sorted(list(missing_in_proxy)[:10]))}")
-    if extra_in_proxy:
-        differences.append(f"Extra words: {', '.join(sorted(list(extra_in_proxy)[:10]))}")
-    
-    # Length difference
-    len_diff = abs(len(text1) - len(text2))
-    if len_diff > 50:
-        differences.append(f"Length difference: {len_diff} characters")
-    
-    return differences
-
-def smart_label_matching(notice_label: str, proxy_label: str) -> bool:
-    """Check if labels refer to the same item (handles variations)"""
-    # Extract numbers from labels
-    notice_num = re.findall(r'\d+', notice_label)
-    proxy_num = re.findall(r'\d+', proxy_label)
-    
-    if notice_num and proxy_num:
-        return notice_num[0] == proxy_num[0]
-    
-    return notice_label.lower().strip() == proxy_label.lower().strip()
-
-def compare_proposals(notice_items: List[ProposalItem], 
-                     proxy_items: List[ProposalItem]) -> List[ComparisonResult]:
+def search_in_proxy(notice_text, proxy_full_text):
     """
-    Intelligently compare notice and proxy items.
-    Handles mismatches, missing items, and provides detailed analysis.
+    Search for the notice text within proxy.
+    Returns: (found, similarity, proxy_snippet)
+    """
+    proxy_clean = clean_text(proxy_full_text)
+    notice_clean = notice_text.lower()
+    proxy_lower = proxy_clean.lower()
+    
+    # Direct substring search
+    if notice_clean in proxy_lower:
+        return (True, 1.0, "Found exact match")
+    
+    # Fuzzy search - look for high similarity chunks
+    notice_words = notice_clean.split()
+    if len(notice_words) < 3:
+        return (False, 0.0, "Text too short to search")
+    
+    # Search for key phrases (first 20 words, last 20 words, middle)
+    key_phrases = [
+        ' '.join(notice_words[:20]),
+        ' '.join(notice_words[-20:]) if len(notice_words) > 20 else '',
+    ]
+    
+    best_similarity = 0.0
+    best_match = ""
+    
+    # Sliding window search through proxy
+    proxy_words = proxy_lower.split()
+    window_size = min(len(notice_words) + 10, len(proxy_words))
+    
+    for i in range(len(proxy_words) - window_size + 1):
+        window = ' '.join(proxy_words[i:i+window_size])
+        similarity = SequenceMatcher(None, notice_clean, window).ratio()
+        
+        if similarity > best_similarity:
+            best_similarity = similarity
+            # Get original text (not lowercased) for display
+            best_match = ' '.join(proxy_full_text.split()[i:i+window_size])
+    
+    # Check key phrases
+    for phrase in key_phrases:
+        if phrase and phrase in proxy_lower:
+            # Found a key phrase
+            if best_similarity < 0.7:
+                best_similarity = 0.85
+                best_match = "Key phrase found in proxy"
+    
+    if best_similarity > 0.7:
+        return (True, best_similarity, best_match[:200])
+    else:
+        return (False, best_similarity, "No match found")
+
+# ---------------------------
+# 5. Compare Notice items with Proxy
+# ---------------------------
+def compare_notice_to_proxy(notice_items, proxy_text):
+    """
+    For each Notice item, search in Proxy and report findings.
     """
     results = []
-    proxy_matched = set()
     
-    # Compare each notice item
-    for notice_item in notice_items:
-        best_match = None
-        best_similarity = 0
-        best_proxy_idx = -1
+    for label, notice_content in notice_items.items():
+        found, similarity, proxy_snippet = search_in_proxy(notice_content, proxy_text)
         
-        # Find best matching proxy item
-        for idx, proxy_item in enumerate(proxy_items):
-            if idx in proxy_matched:
-                continue
-                
-            # Check label matching first
-            if smart_label_matching(notice_item.label, proxy_item.label):
-                similarity = calculate_similarity(notice_item.text, proxy_item.text)
-                if similarity > best_similarity:
-                    best_similarity = similarity
-                    best_match = proxy_item
-                    best_proxy_idx = idx
-        
-        if best_match:
-            proxy_matched.add(best_proxy_idx)
-            
-            if best_similarity >= SIMILARITY_THRESHOLD:
-                status = "✓ MATCH"
-                differences = []
-            else:
-                status = "⚠ PARTIAL MATCH"
-                differences = find_key_differences(notice_item.text, best_match.text)
-            
-            results.append(ComparisonResult(
-                label=notice_item.label,
-                status=status,
-                notice_text=notice_item.original_text,
-                proxy_text=best_match.original_text,
-                similarity=best_similarity,
-                differences=differences,
-                item_type=notice_item.item_type
-            ))
+        if found and similarity >= 0.95:
+            status = "✓ EXACT MATCH"
+        elif found and similarity >= 0.7:
+            status = f"⚠ PARTIAL MATCH ({similarity:.0%})"
         else:
-            results.append(ComparisonResult(
-                label=notice_item.label,
-                status="✗ MISSING IN PROXY",
-                notice_text=notice_item.original_text,
-                proxy_text="",
-                similarity=0.0,
-                differences=["Item not found in proxy"],
-                item_type=notice_item.item_type
-            ))
-    
-    # Check for extra items in proxy
-    for idx, proxy_item in enumerate(proxy_items):
-        if idx not in proxy_matched:
-            results.append(ComparisonResult(
-                label=proxy_item.label,
-                status="⚠ EXTRA IN PROXY",
-                notice_text="",
-                proxy_text=proxy_item.original_text,
-                similarity=0.0,
-                differences=["Item not found in notice"],
-                item_type=proxy_item.item_type
-            ))
+            status = "✗ NOT FOUND IN PROXY"
+        
+        results.append({
+            'label': label,
+            'status': status,
+            'notice_text': notice_content,
+            'similarity': similarity,
+            'proxy_snippet': proxy_snippet if not found else "Match confirmed"
+        })
     
     return results
 
 # ---------------------------
-# 4. ENHANCED PDF REPORT GENERATION
+# 6. Generate PDF Report
 # ---------------------------
-def create_detailed_report(results: List[ComparisonResult], output_pdf: str):
-    """Generate comprehensive QC report with detailed analysis"""
+def create_report(results, output_pdf):
     doc = fitz.open()
     page = doc.new_page()
     
-    # Styling
     y = 40
     left_margin = 40
     right_margin = 550
     max_width = right_margin - left_margin
     
-    def add_text(text: str, fontsize: int = 11, color: tuple = (0, 0, 0), bold: bool = False):
+    def add_text(text, size=11, bold=False, color=(0,0,0)):
         nonlocal y, page
         
-        font = "helv" if not bold else "hebo"
+        if y > 780:
+            page = doc.new_page()
+            y = 40
+        
+        font = "hebo" if bold else "helv"
+        
+        # Word wrap
         words = text.split()
         lines = []
         current = ""
         
         for word in words:
             test = current + " " + word if current else word
-            w = fitz.get_text_length(test, fontname=font, fontsize=fontsize)
-            if w <= max_width:
+            if fitz.get_text_length(test, fontname=font, fontsize=size) <= max_width:
                 current = test
             else:
                 if current:
@@ -372,61 +230,44 @@ def create_detailed_report(results: List[ComparisonResult], output_pdf: str):
             lines.append(current)
         
         for line in lines:
-            if y > 780:
-                page = doc.new_page()
-                y = 40
-            
-            page.insert_text((left_margin, y), line, fontsize=fontsize, 
-                           fontname=font, color=color)
-            y += fontsize + 6
+            page.insert_text((left_margin, y), line, fontsize=size, fontname=font, color=color)
+            y += size + 5
         
-        return y
+        y += 5
     
     # Title
-    add_text("SMART QC REPORT: NOTICE ↔ PROXY COMPARISON", 
-            fontsize=16, bold=True, color=(0, 0, 0.8))
+    add_text("NOTICE ↔ PROXY QC REPORT", size=16, bold=True, color=(0,0,0.8))
+    add_text(f"Total Items Checked: {len(results)}", size=12, bold=True)
     y += 10
     
-    # Summary statistics
-    total = len(results)
-    matches = sum(1 for r in results if r.status == "✓ MATCH")
-    partial = sum(1 for r in results if r.status == "⚠ PARTIAL MATCH")
-    missing = sum(1 for r in results if r.status == "✗ MISSING IN PROXY")
-    extra = sum(1 for r in results if r.status == "⚠ EXTRA IN PROXY")
+    # Summary
+    exact = sum(1 for r in results if '✓' in r['status'])
+    partial = sum(1 for r in results if '⚠' in r['status'])
+    missing = sum(1 for r in results if '✗' in r['status'])
     
-    add_text(f"SUMMARY: {total} items analyzed", fontsize=12, bold=True)
-    add_text(f"  ✓ Perfect Matches: {matches}", color=(0, 0.5, 0))
-    add_text(f"  ⚠ Partial Matches: {partial}", color=(0.8, 0.5, 0))
-    add_text(f"  ✗ Missing in Proxy: {missing}", color=(0.8, 0, 0))
-    add_text(f"  ⚠ Extra in Proxy: {extra}", color=(0.8, 0.5, 0))
-    y += 20
+    add_text(f"✓ Exact Matches: {exact}", color=(0,0.5,0))
+    add_text(f"⚠ Partial Matches: {partial}", color=(0.8,0.5,0))
+    add_text(f"✗ Not Found: {missing}", color=(0.8,0,0))
+    y += 15
     
     # Detailed results
-    add_text("DETAILED ANALYSIS:", fontsize=14, bold=True)
+    add_text("DETAILED FINDINGS:", size=14, bold=True)
     y += 10
     
     for result in results:
-        # Status header
-        color = (0, 0.5, 0) if result.status == "✓ MATCH" else (0.8, 0, 0)
-        add_text(f"{result.label} [{result.item_type}]", fontsize=12, bold=True)
-        add_text(f"Status: {result.status} (Similarity: {result.similarity:.1%})", 
-                color=color)
+        # Item header
+        color = (0,0.5,0) if '✓' in result['status'] else (0.8,0,0) if '✗' in result['status'] else (0.8,0.5,0)
+        
+        add_text(f"Item {result['label']}", size=12, bold=True)
+        add_text(f"Status: {result['status']}", color=color)
         
         # Notice text
-        if result.notice_text:
-            add_text("NOTICE:", fontsize=10, bold=True)
-            add_text(f"  {result.notice_text[:500]}...", fontsize=9)
+        add_text("NOTICE TEXT:", size=10, bold=True)
+        add_text(result['notice_text'][:300] + "..." if len(result['notice_text']) > 300 else result['notice_text'], size=9)
         
-        # Proxy text
-        if result.proxy_text:
-            add_text("PROXY:", fontsize=10, bold=True)
-            add_text(f"  {result.proxy_text[:500]}...", fontsize=9)
-        
-        # Differences
-        if result.differences:
-            add_text("DIFFERENCES:", fontsize=10, bold=True, color=(0.8, 0, 0))
-            for diff in result.differences:
-                add_text(f"  • {diff}", fontsize=9, color=(0.8, 0, 0))
+        # Findings
+        if '✗' in result['status']:
+            add_text("⚠ WARNING: This text was NOT found in the Proxy card", size=9, color=(0.8,0,0), bold=True)
         
         y += 15
     
@@ -436,48 +277,40 @@ def create_detailed_report(results: List[ComparisonResult], output_pdf: str):
 # ---------------------------
 # MAIN PIPELINE
 # ---------------------------
-def main():
-    print("=" * 60)
-    print("SMART PROXY-NOTICE QC COMPARISON TOOL")
-    print("=" * 60)
-    
-    # Extract text
-    print("\n[1/5] Extracting text from Notice PDF...")
-    notice_text = extract_text_area(NOTICE_PDF, NOTICE_CONFIG)
-    
-    print("[2/5] Extracting text from Proxy PDF...")
-    proxy_text = extract_text_area(PROXY_PDF, PROXY_CONFIG)
-    
-    # Parse items
-    print("[3/5] Parsing Notice items...")
-    notice_items = extract_proposals(notice_text)
-    print(f"      Found {len(notice_items)} items in Notice")
-    
-    print("[4/5] Parsing Proxy items...")
-    proxy_items = extract_proposals(proxy_text)
-    print(f"      Found {len(proxy_items)} items in Proxy")
-    
-    # Compare
-    print("[5/5] Performing smart comparison...")
-    results = compare_proposals(notice_items, proxy_items)
-    
-    # Generate report
-    print("\n[REPORT] Generating detailed QC report...")
-    create_detailed_report(results, OUTPUT_PDF)
-    
-    # Summary
-    print("\n" + "=" * 60)
-    print("QC REPORT GENERATED SUCCESSFULLY!")
-    print("=" * 60)
-    print(f"Output: {OUTPUT_PDF}")
-    
-    matches = sum(1 for r in results if r.status == "✓ MATCH")
-    issues = len(results) - matches
-    
-    print(f"\n✓ Perfect Matches: {matches}/{len(results)}")
-    if issues > 0:
-        print(f"⚠ Items with Issues: {issues}")
-    print("\nPlease review the PDF report for detailed analysis.")
+print("="*60)
+print("NOTICE → PROXY QC COMPARISON")
+print("="*60)
 
-if __name__ == "__main__":
-    main()
+# Extract text from both documents
+print("\n[1/4] Extracting text from Notice...")
+notice_text = extract_text_area(NOTICE_PDF, NOTICE_PAGE, NOTICE_X0, NOTICE_Y0, NOTICE_X1, NOTICE_Y1)
+
+print("[2/4] Extracting text from Proxy...")
+proxy_text = extract_text_area(PROXY_PDF, PROXY_PAGE, PROXY_X0, PROXY_Y0, PROXY_X1, PROXY_Y1)
+
+# Extract items from Notice
+print("[3/4] Parsing Notice items...")
+notice_items = extract_notice_items(notice_text)
+print(f"      Found {len(notice_items)} items in Notice")
+
+# Search each Notice item in Proxy
+print("[4/4] Searching for Notice items in Proxy...")
+results = compare_notice_to_proxy(notice_items, proxy_text)
+
+# Generate report
+print("\n[REPORT] Generating QC report...")
+create_report(results, OUTPUT_PDF)
+
+# Summary
+print("\n" + "="*60)
+print("REPORT GENERATED SUCCESSFULLY!")
+print("="*60)
+print(f"Output: {OUTPUT_PDF}")
+
+exact = sum(1 for r in results if '✓' in r['status'])
+issues = len(results) - exact
+
+print(f"\n✓ Items Found: {exact}/{len(results)}")
+if issues > 0:
+    print(f"⚠ Items with Issues: {issues}")
+print("\nPlease review the PDF for detailed findings.")
