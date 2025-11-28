@@ -65,8 +65,60 @@ def extract_text_area(pdf_path: str, config: ExtractionConfig) -> str:
     return text
 
 # ---------------------------
-# 2. INTELLIGENT ITEM DETECTION
+# 2. INTELLIGENT ITEM DETECTION & CLEANING
 # ---------------------------
+def clean_boilerplate(text: str) -> str:
+    """Remove boilerplate content like recommendations, voting instructions, signatures"""
+    
+    # Patterns to remove (case-insensitive)
+    remove_patterns = [
+        # Recommendations
+        r'(?:the\s+)?board\s+(?:of\s+directors\s+)?recommends?\s+(?:a\s+)?vote\s+[^\n.]*',
+        r'(?:the\s+)?board\s+recommends?\s+(?:that\s+you\s+)?(?:vote\s+)?["\']?(?:for|against)["\']?[^\n.]*',
+        r'recommendation:\s*[^\n]*',
+        r'vote\s+required:\s*[^\n]*',
+        r'required\s+vote:\s*[^\n]*',
+        
+        # Voting headers/instructions
+        r'for\s+against\s+abstain',
+        r'please\s+mark\s+here',
+        r'check\s+the\s+appropriate\s+box',
+        r'mark\s+only\s+one\s+box',
+        r'[\[\]☐☑✓✗]\s*for\s*[\[\]☐☑✓✗]\s*against\s*[\[\]☐☑✓✗]\s*abstain',
+        
+        # Signature blocks
+        r'signature\s*:?\s*[^\n]*',
+        r'sign\s+here\s*:?[^\n]*',
+        r'dated?\s*:?\s*[^\n]*',
+        r'date\s*:?\s*[^\n]*',
+        r'please\s+sign\s+exactly[^\n]*',
+        r'when\s+signing\s+as[^\n]*',
+        
+        # Form instructions
+        r'important:?\s*please\s+sign[^\n]*',
+        r'to\s+vote,?\s+mark\s+blocks[^\n]*',
+        r'please\s+vote,?\s+date\s+and\s+sign[^\n]*',
+        r'this\s+proxy\s+must\s+be\s+signed[^\n]*',
+        r'please\s+fold\s+and\s+detach[^\n]*',
+        r'detach\s+here[^\n]*',
+        r'proxy\s+card[^\n]*',
+        
+        # Page numbers and references
+        r'page\s+\d+\s+of\s+\d+',
+        r'see\s+reverse\s+side',
+        r'continued\s+on\s+next\s+page',
+    ]
+    
+    cleaned = text
+    for pattern in remove_patterns:
+        cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE | re.MULTILINE)
+    
+    # Remove multiple spaces/newlines
+    cleaned = re.sub(r'\n\s*\n', '\n', cleaned)
+    cleaned = re.sub(r'\s+', ' ', cleaned)
+    
+    return cleaned.strip()
+
 def detect_item_type(text: str) -> str:
     """Detect what type of item this is (proposal, director, resolution, etc.)"""
     text_lower = text.lower()
@@ -101,7 +153,11 @@ def extract_proposals(text: str) -> List[ProposalItem]:
     """
     Intelligently extract proposals/items from text.
     Handles various numbering schemes and formats.
+    CLEANS OUT boilerplate content like recommendations, voting instructions, signatures.
     """
+    # First, clean boilerplate from entire text
+    text = clean_boilerplate(text)
+    
     proposals = []
     current_label = "INTRO"
     current_text = []
@@ -133,12 +189,16 @@ def extract_proposals(text: str) -> List[ProposalItem]:
             # Save previous item
             if current_text:
                 full_text = ' '.join(current_text)
-                proposals.append(ProposalItem(
-                    label=current_label,
-                    text=normalize_text(full_text),
-                    original_text=full_text,
-                    item_type=detect_item_type(full_text)
-                ))
+                # Clean boilerplate from this specific item too
+                full_text = clean_boilerplate(full_text)
+                
+                if full_text:  # Only add if there's content after cleaning
+                    proposals.append(ProposalItem(
+                        label=current_label,
+                        text=normalize_text(full_text),
+                        original_text=full_text,
+                        item_type=detect_item_type(full_text)
+                    ))
             
             # Start new item
             current_label = match.group(0).strip()
@@ -150,12 +210,16 @@ def extract_proposals(text: str) -> List[ProposalItem]:
     # Don't forget the last item
     if current_text:
         full_text = ' '.join(current_text)
-        proposals.append(ProposalItem(
-            label=current_label,
-            text=normalize_text(full_text),
-            original_text=full_text,
-            item_type=detect_item_type(full_text)
-        ))
+        # Clean boilerplate from this specific item too
+        full_text = clean_boilerplate(full_text)
+        
+        if full_text:  # Only add if there's content after cleaning
+            proposals.append(ProposalItem(
+                label=current_label,
+                text=normalize_text(full_text),
+                original_text=full_text,
+                item_type=detect_item_type(full_text)
+            ))
     
     return proposals
 
